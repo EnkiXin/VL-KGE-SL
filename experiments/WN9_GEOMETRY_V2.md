@@ -58,11 +58,12 @@ head and tail directions separated. Evaluation filters all known triples,
 again directionally, and documents tie handling. No test scoring during
 profiling or hyperparameter selection.
 
-First verify both radii on all three models with bounded GPU smoke checks.
-Then compare radii {1.5, 2.0} and learning rates {0.003, 0.01, 0.03},
-three methods each: 18 matched trials, up to 30 epochs each, complete validation.
-The executable plan is finalized after measuring GPU speed and memory. Do not
-mistake the plan for completed or running trials.
+GPU smoke checks passed for both radii and all three models without OOM.
+Measured throughput sets the first-stage screen to 15 epochs for each of the
+18 matched trials: radii {1.5, 2.0}, learning rates {0.003, 0.01, 0.03}, and
+three methods, with complete validation. Thirty epochs across all 18 trials
+would exceed the inherited budget. This pilot is not a final-convergence or
+final-test result; the ready plan still requires an explicit queue command.
 
 The inherited compute deadline remains **2026-09-06 12:17:36 UTC** (21:17:36 JST).
 Setup, profiling and the new queue do not silently reset the earlier eight-hour
