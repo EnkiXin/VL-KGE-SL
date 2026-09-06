@@ -53,7 +53,10 @@ def parse_args(argv=None):
     parser.add_argument("--query-batch", type=int, default=32)
     parser.add_argument("--candidate-chunk", type=int, default=256)
     parser.add_argument("--grad-clip", type=float, default=5.0)
-    parser.add_argument("--log-order", type=int, choices=(16, 32), default=16)
+    parser.add_argument("--log-backend", choices=("gregory12", "gauss_legendre"), default="gregory12",
+                        help="SL log implementation; saved results cannot mix backends")
+    parser.add_argument("--log-order", type=int, choices=(16, 32), default=16,
+                        help="Gauss-Legendre order only; Gregory always uses exactly 12 terms")
     parser.add_argument("--validation-seed", type=int, default=260906)
     parser.add_argument("--max-train-batches", type=int)
     parser.add_argument("--eval-limit", type=int)
@@ -251,6 +254,20 @@ def check_health(value, prefix="diagnostics"):
         raise FloatingPointError(f"Nonfinite diagnostic: {prefix}")
 
 
+def check_diagnostic_backend(value, backend, log_order, geometry):
+    """Require actual model diagnostics to identify the requested log track."""
+    terms = 12 if backend == "gregory12" else log_order
+    contract = value.get("model_contract", {}) if isinstance(value, dict) else {}
+    if (not isinstance(value, dict) or value.get("log_backend") != backend
+            or value.get("geometry") != geometry or not isinstance(contract, dict)
+            or contract.get("log_backend") != backend or contract.get("log_terms") != terms):
+        raise RuntimeError("Model diagnostic backend/order differs from the requested configuration")
+    if geometry == "sl8":
+        principal = value.get("principal_log", {})
+        if not isinstance(principal, dict) or principal.get("backend") != backend:
+            raise RuntimeError("SL principal-log diagnostic reports a different backend")
+
+
 def initial_score_statistics(model, positive_cpu, negative_cpu, device, alpha, offset):
     """Read-only, train-only score/gradient preflight before any update."""
     import torch
@@ -295,6 +312,7 @@ def main(argv=None):
         "negative_sampling": "uniform_without_replacement_per_triple",
         "loss": "author_logistic_mean_over_1_positive_and_N_negatives",
         "score_distance_power": 1, "optimizer": "Adagrad", "test_evaluated": False,
+        "log_backend": args.log_backend, "log_terms": 12 if args.log_backend == "gregory12" else args.log_order,
         "warning": "New strict-filter protocol; old author-release scores are not directly comparable.",
         "args": config, "config": config, "completed_epochs": 0,
         "best_epoch": None, "best_validation_mrr": None,
@@ -344,7 +362,7 @@ def main(argv=None):
             **model_args, device=device, geometry=args.model, coordinate_scale=args.coordinate_scale,
             chart_radius=args.chart_radius, initial_logit_scale=args.initial_logit_scale,
             initial_offset=args.initial_offset, score_chunk=args.score_chunk,
-            checkpoint_blocks=True, log_order=args.log_order,
+            checkpoint_blocks=True, log_order=args.log_order, log_backend=args.log_backend,
         ).to(device)
         train_entity_ids = torch.unique(triples[0][:, (0, 2)].reshape(-1)).to(device)
         initialization = model.initialize_geometry(train_entity_ids, target_norm=args.target_init_norm)
@@ -362,6 +380,7 @@ def main(argv=None):
         def diagnostics():
             with torch.no_grad():
                 value = model.diagnostics(probe[:, 0], probe[:, 1], probe[:, 2])
+            check_diagnostic_backend(value, args.log_backend, args.log_order, args.model)
             check_health(value)
             return value
 
@@ -417,6 +436,7 @@ def main(argv=None):
                 "train_seconds": train_seconds, "epoch_seconds": time.monotonic() - epoch_start,
                 "validation": {key: value for key, value in validation.items() if not key.startswith("ranks_")},
                 "validation_scope": state["validation_scope"], "subset_indices_hash": state["subset_indices_hash"],
+                "log_backend": args.log_backend, "log_terms": state["log_terms"],
                 "diagnostics": health, "max_gradient_norm": max_grad_norm,
                 "first_batch_negative_sha256": first_negative_hash,
                 "peak_allocated_gib": torch.cuda.max_memory_allocated() / 2**30,
@@ -429,6 +449,7 @@ def main(argv=None):
                 checkpoint = {
                     "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
                     "epoch": epoch, "score": best, "args": config, "protocol": PROTOCOL,
+                    "log_backend": args.log_backend, "log_terms": state["log_terms"],
                     "validation_selection": selection, "validation": event["validation"],
                     "shuffle_generator_state": shuffle_generator.get_state(),
                     "negative_rng_state": sampler.rng.bit_generator.state,

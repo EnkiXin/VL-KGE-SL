@@ -187,7 +187,26 @@ class RunnerGuardTests(unittest.TestCase):
         self.assertEqual(args.target_init_norm, 0.5)
         self.assertEqual(args.coordinate_scale, 1)
         self.assertEqual(args.negatives, 100)
+        self.assertEqual(args.log_backend, "gregory12")
         self.assertTrue(args.validation_only)
+
+    def test_explicit_gl_backend_remains_available(self):
+        args = runner.parse_args(["--root", ".", "--run-dir", "not-created", "--model", "sl8",
+                                  "--log-backend", "gauss_legendre", "--log-order", "32"])
+        self.assertEqual(args.log_backend, "gauss_legendre")
+        self.assertEqual(args.log_order, 32)
+
+    def test_model_backend_diagnostic_must_match_requested_track(self):
+        for backend, order, terms in (("gregory12", 16, 12), ("gauss_legendre", 32, 32)):
+            diagnostic = {"geometry": "sl8", "log_backend": backend,
+                          "model_contract": {"log_backend": backend, "log_terms": terms},
+                          "principal_log": {"backend": backend}}
+            runner.check_diagnostic_backend(diagnostic, backend, order, "sl8")
+            for replacement in ({"log_backend": "unknown"},
+                                {"model_contract": {"log_backend": backend, "log_terms": 7}},
+                                {"principal_log": {"backend": "unknown"}}, {"geometry": "euclidean"}):
+                with self.subTest(backend=backend, replacement=replacement), self.assertRaises(RuntimeError):
+                    runner.check_diagnostic_backend({**diagnostic, **replacement}, backend, order, "sl8")
 
     def test_v2_health_does_not_reinstate_old_cayley_series_threshold(self):
         runner.check_health({"cayley_norm": 2, "max_gregory_frobenius_remainder_bound": 100})

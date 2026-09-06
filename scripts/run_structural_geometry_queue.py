@@ -1,9 +1,9 @@
-"""Execute explicit WN9 V2 trials, without test scoring, before one UTC deadline.
+"""Bounded validation-only structural KGE queue; reuses WN9 queue safety helpers.
 
-No automatic promotions, resume, or extra wall budget. A control-file sentinel
-requests a stop after the current trial and its persistent backup are finished.
+Plans list explicit smoke/profile/screen jobs. Dataset-dependent validation
+scope, optimization steps and evaluation cadence are checked before acceptance.
+No resume, test scoring, automatic promotion or extension of the UTC deadline.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -14,132 +14,116 @@ import json
 import math
 import os
 from pathlib import Path
-import re
-import shutil
 import signal
 import struct
 import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import run_wn9_geometry_v2_queue as common_queue
 
+utc = common_queue.utc
+parse_utc = common_queue.parse_utc
+name = common_queue.name
+digest = common_queue.digest
+save_json = common_queue.save_json
+backup_worker = common_queue.backup_worker
+stop_child = common_queue.stop_child
+TRAIN_RESERVE_SECONDS = common_queue.TRAIN_RESERVE_SECONDS
+MODELS = common_queue.MODELS
+PROTOCOL = "structural_directional_v1"
+DATASETS = {
+    "WN18RR": (40943, 11, 86835, 3034, 3134),
+    "FB15k-237": (14541, 237, 272115, 17535, 20466),
+}
 DEFAULTS = {
-    "kind": "pilot", "epochs": 30, "patience": 50, "seed": 42,
-    "lr": .003, "coordinate_scale": 1.0, "chart_radius": 1.5,
+    "kind": "pilot", "epochs": 15, "eval_every": 5, "patience": 50, "seed": 42,
+    "lr": .01, "chart_radius": 1.5, "target_init_norm": .5,
     "initial_logit_scale": 1.0, "initial_offset": 0.0,
-    "target_init_norm": .5, "batch_size": 512, "negatives": 100,
-    "score_chunk": 1024, "query_batch": 32, "candidate_chunk": 256,
-    "grad_clip": 5.0, "log_backend": "gregory12", "log_order": 16, "validation_seed": 260906,
+    "batch_size": 512, "negatives": 100, "score_chunk": 1024,
+    "query_batch": 32, "candidate_chunk": 256, "grad_clip": 5.0,
+    "log_backend": "gregory12", "log_order": 16, "validation_seed": 260906,
     "max_train_batches": None, "eval_limit": None,
 }
-MODELS = ("euclidean", "hyperbolic", "sl8")
-PROTOCOL = "strict_directional_v2"
-TRAIN_RESERVE_SECONDS = 45.0
-SHUTDOWN_GRACE_SECONDS = 10.0
 
 
-def utc():
-    return datetime.now(timezone.utc).isoformat()
-
-
-def parse_utc(value):
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None or parsed.utcoffset().total_seconds() != 0:
-            raise ValueError("explicit UTC timezone is required")
-        return parsed.astimezone(timezone.utc)
-    except (ValueError, TypeError, AttributeError) as error:
-        raise argparse.ArgumentTypeError("use an explicit UTC timestamp, e.g. 2026-09-06T12:17:36Z") from error
-
-
-def name(value):
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
-        raise ValueError("Queue and job IDs must be simple directory names")
-    return value
-
-
-def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def save_json(path, value):
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
-    os.replace(temporary, path)
-
-
-def load_plan(path, deadline):
+def load_plan(path, deadline, root=None):
+    root = Path.cwd() if root is None else root
     raw = json.loads(path.read_text())
     if isinstance(raw, list):
         raw = {"schema_version": 1, "jobs": raw}
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
-        raise ValueError("Expected schema_version=1 plan with a jobs list")
+        raise ValueError("Expected schema_version=1 and explicit jobs")
     if "deadline_utc" in raw and parse_utc(raw["deadline_utc"]) != deadline:
         raise ValueError("CLI deadline differs from the authorized plan deadline")
     common, entries = raw.get("common", {}), raw.get("jobs")
-    if not isinstance(common, dict) or set(common) - set(DEFAULTS):
+    keys = set(DEFAULTS) | {"data_root", "dataset"}
+    if not isinstance(common, dict) or set(common) - keys:
         raise ValueError("Unknown common trainer settings")
     if not isinstance(entries, list) or not entries:
         raise ValueError("Plan has no jobs")
     jobs = []
     for entry in entries:
-        if not isinstance(entry, dict) or set(entry) - (set(DEFAULTS) | {"job_id", "stage", "model"}):
+        if not isinstance(entry, dict) or set(entry) - (keys | {"job_id", "stage", "model"}):
             raise ValueError("Unknown job fields; arbitrary commands are forbidden")
-        config = {**DEFAULTS, **common, **{k: v for k, v in entry.items() if k in DEFAULTS}}
+        config = {**DEFAULTS, **common, **{k: v for k, v in entry.items() if k in keys}}
         model, stage = entry.get("model"), entry.get("stage")
         if model not in MODELS or stage not in ("smoke", "profile", "screen"):
-            raise ValueError("Invalid model or stage (no automatic confirmation/test stage)")
+            raise ValueError("Invalid structural model/stage")
         config["model"] = model
+        if config.get("dataset") not in DATASETS:
+            raise ValueError("Dataset must be WN18RR or FB15k-237")
+        data_root = config.get("data_root")
+        if not isinstance(data_root, str) or not data_root:
+            raise ValueError("Explicit data_root is required")
+        data_root = Path(data_root).expanduser()
+        config["data_root"] = str((data_root if data_root.is_absolute() else root / data_root).resolve())
         if config["kind"] not in ("smoke", "pilot"):
-            raise ValueError("Only validation-only smoke/pilot trials are allowed")
+            raise ValueError("Only validation-only smoke/pilot jobs are permitted")
         if stage == "screen" and config["kind"] != "pilot":
-            raise ValueError("Screen trials must train/evaluate complete epochs and full validation")
-        for key in ("epochs", "patience", "batch_size", "negatives", "score_chunk", "query_batch", "candidate_chunk", "log_order"):
+            raise ValueError("Screen requires full training and complete validation")
+        for key in ("epochs", "eval_every", "patience", "batch_size", "negatives", "score_chunk", "query_batch", "candidate_chunk", "log_order"):
             if isinstance(config[key], bool) or not isinstance(config[key], int) or config[key] <= 0:
                 raise ValueError(f"{key} must be a positive integer")
-        if config["log_backend"] not in ("gregory12", "gauss_legendre"):
-            raise ValueError("Use an explicit gregory12 or gauss_legendre backend")
-        if config["log_order"] not in (16, 32):
-            raise ValueError("GL order must be 16 or 32; Gregory always uses 12 terms")
+        if config["log_backend"] != "gregory12" or config["log_order"] != 16:
+            raise ValueError("This queue uses Gregory12 only; log_order=16 is an inactive compatibility setting")
         for key in ("seed", "validation_seed"):
             if isinstance(config[key], bool) or not isinstance(config[key], int) or config[key] < 0:
                 raise ValueError(f"{key} must be a nonnegative integer")
-        for key in ("lr", "coordinate_scale", "chart_radius", "initial_logit_scale", "target_init_norm", "grad_clip"):
-            if isinstance(config[key], bool) or not isinstance(config[key], (float, int)) or not math.isfinite(config[key]) or config[key] <= 0:
+        for key in ("lr", "chart_radius", "target_init_norm", "initial_logit_scale", "grad_clip"):
+            if isinstance(config[key], bool) or not isinstance(config[key], (int, float)) or not math.isfinite(config[key]) or config[key] <= 0:
                 raise ValueError(f"{key} must be finite and positive")
-        if isinstance(config["initial_offset"], bool) or not isinstance(config["initial_offset"], (float, int)) or not math.isfinite(config["initial_offset"]):
+        if config["target_init_norm"] >= config["chart_radius"]:
+            raise ValueError("Initialization norm must be below the chart radius")
+        if isinstance(config["initial_offset"], bool) or not isinstance(config["initial_offset"], (int, float)) or not math.isfinite(config["initial_offset"]):
             raise ValueError("initial_offset must be finite")
         for key in ("max_train_batches", "eval_limit"):
-            value = config[key]
-            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0 or config["kind"] != "smoke"):
+            v = config[key]
+            if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v <= 0 or config["kind"] != "smoke"):
                 raise ValueError(f"{key} is a positive smoke-only option")
-        if config["target_init_norm"] >= config["chart_radius"]:
-            raise ValueError("target_init_norm must be strictly below chart_radius")
         jobs.append({"job_id": name(entry.get("job_id")), "stage": stage, "config": config, "status": "not_started"})
     if len({job["job_id"] for job in jobs}) != len(jobs):
         raise ValueError("Duplicate job IDs")
     order = {"smoke": 0, "profile": 1, "screen": 2}
     if [order[j["stage"]] for j in jobs] != sorted(order[j["stage"]] for j in jobs):
-        raise ValueError("Run smoke/profile before screening")
+        raise ValueError("Run smoke/profile before screen")
     return raw, jobs
 
 
 def source_fingerprints(root, plan):
-    paths = [root / "scripts/run_wn9_geometry_v2.py", root / "scripts/run_wn9_geometry_v2_queue.py",
-             root / "scripts/run_geometry.py", plan]
-    for folder in (root / "geometry", root / "structural_kge", root / "upstream/vl-kge/vlkge"):
-        if folder.is_dir():
-            paths += sorted(folder.rglob("*.py"))
-    for folder in (root / "vendor/sl-manifold-core/src/sl_manifold", root.parent / "sl-manifold-core/src/sl_manifold"):
-        if folder.is_dir():
-            paths += sorted(folder.glob("*.py"))
-            break
-    # Dataset byte verification is independently performed by the trainer.
-    return {str(path): digest(path) for path in paths if path.is_file()}
+    result = common_queue.source_fingerprints(root, plan)
+    for path in (root / "scripts/run_structural_geometry.py",
+                 root / "scripts/run_structural_geometry_queue.py"):
+        if path.is_file():
+            result[str(path)] = digest(path)
+    # The shared helper includes structural/geometry modules, WN9 runner,
+    # old input/loss helpers, the author Python sources, and shared SL core.
+    return result
 
 
 def runner_command(root, run_dir, config):
-    command = [sys.executable, "-u", str(root / "scripts/run_wn9_geometry_v2.py"),
+    command = [sys.executable, "-u", str(root / "scripts/run_structural_geometry.py"),
                "--root", str(root), "--run-dir", str(run_dir), "--validation-only"]
     for key, value in config.items():
         if value is not None:
@@ -149,91 +133,90 @@ def runner_command(root, run_dir, config):
 
 def checked_result(run_dir, job):
     result = json.loads((run_dir / "result.json").read_text())
+    cfg = job["config"]
+    entities, relations, train_count, valid_count, test_count = DATASETS[cfg["dataset"]]
     if (result.get("status") != "completed_validation_only" or result.get("test_evaluated") is not False
-            or "final_test" in result or result.get("model") != job["config"]["model"]
-            or result.get("evaluation_protocol") != PROTOCOL
+            or "final_test" in result or result.get("dataset") != cfg["dataset"]
+            or result.get("model") != cfg["model"] or result.get("evaluation_protocol") != PROTOCOL
             or result.get("training_negative_filter") != "train_only_directional"
             or result.get("validation_filter") != "all_splits_directional"
             or result.get("tie_policy") != "realistic_average"
             or result.get("negative_sampling") != "uniform_without_replacement_per_triple"
-            or result.get("score_distance_power") != 1 or result.get("optimizer") != "Adagrad"
-            or result.get("dataset") != "WN9-IMG"):
-        raise ValueError("Result violates the requested test-free WN9 V2 protocol")
+            or result.get("score_distance_power") != 1 or result.get("optimizer") != "Adagrad"):
+        raise ValueError("Result violates the requested test-free structural protocol")
     actual = result.get("config", result.get("args"))
-    if not isinstance(actual, dict) or any(actual.get(k) != v for k, v in job["config"].items()):
-        raise ValueError("Effective trainer configuration differs from the saved queue configuration")
-    backend = job["config"]["log_backend"]
-    terms = 12 if backend == "gregory12" else job["config"]["log_order"]
-    if result.get("log_backend") != backend or result.get("log_terms") != terms:
-        raise ValueError("Result log backend/order differs from the saved queue configuration")
-    last_epoch = result.get("last_epoch", {})
-    diagnostics = (result.get("initial_diagnostics"),
-                   last_epoch.get("diagnostics") if isinstance(last_epoch, dict) else None,
-                   result.get("best_checkpoint_diagnostics"))
-    for diagnostic in diagnostics:
+    if not isinstance(actual, dict) or any(actual.get(k) != v for k, v in cfg.items()):
+        raise ValueError("Effective trainer configuration differs from the queue snapshot")
+    if (result.get("log_backend") != "gregory12" or result.get("log_terms") != 12
+            or result.get("entity_bias") is not False or result.get("coordinate_dim") != 63):
+        raise ValueError("Result changed the Gregory12, linear 63-D no-entity-bias model contract")
+    diagnostic_rows = (result.get("initial_diagnostics"), result.get("last_epoch", {}).get("diagnostics"),
+                       result.get("best_checkpoint_diagnostics"))
+    for diagnostic in diagnostic_rows:
         contract = diagnostic.get("model_contract", {}) if isinstance(diagnostic, dict) else {}
-        if (not isinstance(diagnostic, dict) or diagnostic.get("log_backend") != backend
-                or diagnostic.get("geometry") != job["config"]["model"]
-                or diagnostic.get("sampled_health_passed") is not True
-                or not isinstance(contract, dict) or contract.get("log_backend") != backend
-                or contract.get("log_terms") != terms):
-            raise ValueError("Missing/unsafe model diagnostic or mixed log backend provenance")
-        if job["config"]["model"] == "sl8":
-            principal = diagnostic.get("principal_log", {})
-            if not isinstance(principal, dict) or principal.get("backend") != backend:
-                raise ValueError("SL principal-log diagnostic backend differs from the saved configuration")
+        if (not isinstance(diagnostic, dict) or diagnostic.get("log_backend") != "gregory12"
+                or diagnostic.get("geometry") != cfg["model"] or diagnostic.get("sampled_health_passed") is not True
+                or contract.get("log_backend") != "gregory12" or contract.get("log_terms") != 12
+                or contract.get("entity_bias") is not False or contract.get("distance_power") != 1
+                or contract.get("dimension") != 63):
+            raise ValueError("Missing/unsafe diagnostic or mixed geometry/backend provenance")
+        if cfg["model"] == "sl8" and diagnostic.get("principal_log", {}).get("backend") != "gregory12":
+            raise ValueError("SL diagnostic backend is inconsistent")
+    if (result.get("num_entities") != entities or result.get("num_relations") != relations
+            or result.get("split_sizes") != [train_count, valid_count, test_count]
+            or result.get("train_count") != train_count):
+        raise ValueError("Pinned dataset entity/relation/split counts differ")
+    expected_parameters = (entities + relations) * 63 + 2
+    if result.get("parameters_trainable") != expected_parameters or result.get("parameters_total") != expected_parameters:
+        raise ValueError("Structural parameter budget differs from direct 63-D tables plus two scalars")
+    provenance = result.get("dataset_provenance", {})
+    if (result.get("dataset_commit") != "2e440e0f9c687314d5ff67ead68ce985dc446e3a"
+            or provenance.get("commit") != result["dataset_commit"] or provenance.get("dataset") != cfg["dataset"]):
+        raise ValueError("Missing or unexpected pinned data provenance")
     score, epoch, completed = (result.get(k) for k in ("best_validation_mrr", "best_epoch", "completed_epochs"))
     if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= 1:
         raise ValueError("Invalid validation MRR")
-    if any(isinstance(v, bool) or not isinstance(v, int) for v in (epoch, completed)) or not 1 <= epoch <= completed <= job["config"]["epochs"]:
-        raise ValueError("Invalid completed/best epoch provenance")
-    count, total = result.get("validation_count"), result.get("validation_total_count")
-    expected = min(job["config"]["eval_limit"] or 1337, 1337)
-    if count != expected or total != 1337 or result.get("validation_scope") != ("full" if expected == 1337 else "subset"):
-        raise ValueError("Validation scope/count mismatch")
+    if any(isinstance(v, bool) or not isinstance(v, int) for v in (epoch, completed)) or not 1 <= epoch <= completed <= cfg["epochs"]:
+        raise ValueError("Invalid epoch provenance")
+    expected_valid = min(cfg["eval_limit"] or valid_count, valid_count)
+    if (result.get("validation_count") != expected_valid or result.get("validation_total_count") != valid_count
+            or result.get("validation_scope") != ("full" if expected_valid == valid_count else "subset")):
+        raise ValueError("Dataset-dependent validation scope/count mismatch")
     indices = result.get("validation_indices")
-    if (not isinstance(indices, list) or len(indices) != count
-            or any(isinstance(i, bool) or not isinstance(i, int) or not 0 <= i < total for i in indices)
-            or len(set(indices)) != count):
-        raise ValueError("Missing or invalid ordered validation indices")
-    expected_hash = hashlib.sha256(struct.pack("<" + "q" * len(indices), *indices)).hexdigest()
-    if result.get("subset_indices_hash") != expected_hash:
+    if (not isinstance(indices, list) or len(indices) != expected_valid or len(set(indices)) != len(indices)
+            or any(isinstance(i, bool) or not isinstance(i, int) or not 0 <= i < valid_count for i in indices)):
+        raise ValueError("Invalid ordered validation indices")
+    index_hash = hashlib.sha256(struct.pack("<" + "q" * len(indices), *indices)).hexdigest()
+    if result.get("subset_indices_hash") != index_hash:
         raise ValueError("Validation index hash mismatch")
-    if job["config"]["kind"] == "pilot" and result.get("training_complete") is not True:
-        raise ValueError("Pilot result contains truncated training")
+    expected_validated = [e for e in range(1, completed + 1) if e % cfg["eval_every"] == 0 or e == cfg["epochs"]]
+    if not expected_validated or result.get("validation_epochs") != expected_validated or epoch not in expected_validated:
+        raise ValueError("Evaluation cadence differs from every-N plus final epoch")
+    full_batches = math.ceil(train_count / cfg["batch_size"])
+    batches = min(cfg["max_train_batches"] or full_batches, full_batches)
+    train_complete = batches == full_batches
+    if result.get("training_complete") is not train_complete:
+        raise ValueError("Truncated training label is inaccurate")
+    events = [json.loads(line) for line in (run_dir / "epochs.jsonl").read_text().splitlines() if line.strip()]
+    if len(events) != completed or [e.get("epoch") for e in events] != list(range(1, completed + 1)):
+        raise ValueError("Missing or duplicated epoch records")
+    steps = 0
+    for event in events:
+        if event.get("train_batches") != batches or event.get("train_examples") != min(train_count, batches * cfg["batch_size"]):
+            raise ValueError("Recorded training batches/examples differ from the plan")
+        validation = event.get("validation")
+        if event["epoch"] in expected_validated:
+            if (not isinstance(validation, dict) or validation.get("evaluated_triples") != expected_valid
+                    or validation.get("num_entities") != entities or validation.get("directional_queries") != 2 * expected_valid):
+                raise ValueError("Validation event used an incomplete query/candidate scope")
+        elif validation is not None:
+            raise ValueError("Unexpected extra validation event")
+        steps += event["train_batches"]
+    if result.get("total_optimizer_steps") != steps:
+        raise ValueError("Optimizer step total is inconsistent with the epoch log")
     if not (run_dir / "best.pt").is_file():
-        raise ValueError("Completed result is missing best.pt")
+        raise ValueError("Completed validation result has no best.pt")
     return result
-
-
-def backup_worker(source, log, destination, queue_state):
-    if destination.exists() or destination.is_symlink():
-        raise FileExistsError(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name("." + destination.name + ".partial")
-    if temporary.exists() or temporary.is_symlink():
-        raise FileExistsError(temporary)
-    shutil.copytree(source, temporary, symlinks=True, ignore=shutil.ignore_patterns("*.tmp"))
-    shutil.copy2(log, temporary / "train.log")
-    shutil.copy2(queue_state, temporary / "queue_snapshot.json")
-    os.rename(temporary, destination)
-
-
-def stop_child(process, remaining):
-    """Signal only the actual Popen child; never inspect or kill other GPU users."""
-    if process is None or process.poll() is not None:
-        return
-    try:
-        process.send_signal(signal.SIGINT)
-        process.wait(timeout=max(0, min(SHUTDOWN_GRACE_SECONDS, remaining() - 2)))
-    except ProcessLookupError:
-        return
-    except subprocess.TimeoutExpired:
-        process.kill()
-        try:
-            process.wait(timeout=max(0, min(2, remaining())))
-        except subprocess.TimeoutExpired:
-            pass  # Child was killed; its inherited lock prevents overlap until exit.
 
 
 def parse_args(argv=None):
@@ -243,17 +226,16 @@ def parse_args(argv=None):
     parser.add_argument("--queue-id", type=name, required=True)
     parser.add_argument("--deadline-utc", type=parse_utc, required=True)
     parser.add_argument("--backup-root", type=Path, required=True)
-    parser.add_argument("--stop-after-current", type=Path,
-                        help="Control file: existence stops before the next trial, after backup. Default: queue/STOP_AFTER_CURRENT")
+    parser.add_argument("--stop-after-current", type=Path)
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
     root, plan = args.root.resolve(), args.plan.resolve()
-    if not (root / "scripts/run_wn9_geometry_v2.py").is_file():
-        raise FileNotFoundError("Missing WN9 V2 trainer")
-    raw_plan, jobs = load_plan(plan, args.deadline_utc)
+    if not (root / "scripts/run_structural_geometry.py").is_file():
+        raise FileNotFoundError("Missing structural geometry trainer")
+    raw_plan, jobs = load_plan(plan, args.deadline_utc, root)
     started = time.monotonic()
     budget = (args.deadline_utc - datetime.now(timezone.utc)).total_seconds()
     if budget <= TRAIN_RESERVE_SECONDS:
@@ -374,7 +356,8 @@ def main(argv=None):
                     result = checked_result(run_dir, job)
                     for previous in jobs:
                         previous_result = previous.get("validated_result")
-                        if (previous_result and previous["config"]["validation_seed"] == job["config"]["validation_seed"]
+                        if (previous_result and previous["config"]["dataset"] == job["config"]["dataset"]
+                                and previous["config"]["validation_seed"] == job["config"]["validation_seed"]
                                 and previous_result["validation_count"] == result["validation_count"]
                                 and previous_result["subset_indices_hash"] != result["subset_indices_hash"]):
                             raise ValueError("Matched trials used different ordered validation subsets")

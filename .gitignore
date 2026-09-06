@@ -10,6 +10,7 @@ runs/
 artifacts/
 upstream/
 datasets/
+data/structural/
 features/
 experiments/prepared/
 STATUS.md

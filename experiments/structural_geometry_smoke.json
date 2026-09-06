@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "deadline_utc": "2026-09-06T12:17:36Z",
+  "purpose": "GPU integration smoke only: truncated training and 32 validation triples, never a reported benchmark result. No automatic promotion.",
+  "test_scoring_allowed": false,
+  "common": {
+    "data_root": "data/structural", "kind": "smoke", "epochs": 1, "eval_every": 1,
+    "seed": 42, "lr": 0.01, "chart_radius": 2.0, "target_init_norm": 0.5,
+    "initial_logit_scale": 1.0, "initial_offset": 0.0,
+    "batch_size": 512, "negatives": 100, "score_chunk": 1024,
+    "query_batch": 32, "candidate_chunk": 256, "grad_clip": 5.0,
+    "log_backend": "gregory12", "validation_seed": 260906,
+    "max_train_batches": 3, "eval_limit": 32
+  },
+  "jobs": [
+    {"job_id": "wn18rr-r20-sl8", "dataset": "WN18RR", "stage": "smoke", "model": "sl8"},
+    {"job_id": "wn18rr-r20-euclidean", "dataset": "WN18RR", "stage": "smoke", "model": "euclidean"},
+    {"job_id": "wn18rr-r20-hyperbolic", "dataset": "WN18RR", "stage": "smoke", "model": "hyperbolic"},
+    {"job_id": "fb237-r20-sl8", "dataset": "FB15k-237", "stage": "smoke", "model": "sl8"},
+    {"job_id": "fb237-r20-euclidean", "dataset": "FB15k-237", "stage": "smoke", "model": "euclidean"},
+    {"job_id": "fb237-r20-hyperbolic", "dataset": "FB15k-237", "stage": "smoke", "model": "hyperbolic"}
+  ]
+}

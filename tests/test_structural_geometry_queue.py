@@ -19,23 +19,24 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("wn9_v2_queue", ROOT / "scripts/run_wn9_geometry_v2_queue.py")
+SPEC = importlib.util.spec_from_file_location("structural_queue", ROOT / "scripts/run_structural_geometry_queue.py")
 queue = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(queue)
 
 
-class WN9V2QueueTests(unittest.TestCase):
+class StructuralQueueTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name).resolve()
         self.root = self.base / "project"
         (self.root / "scripts").mkdir(parents=True)
-        (self.root / "scripts/run_wn9_geometry_v2.py").write_text("# synthetic trainer\n")
+        (self.root / "scripts/run_structural_geometry.py").write_text("# synthetic trainer\n")
         self.plan = self.base / "plan.json"
         self.deadline = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
         self.raw = {"schema_version": 1, "deadline_utc": self.deadline,
-                    "common": {"kind": "smoke", "epochs": 2, "max_train_batches": 3, "eval_limit": 32},
+                    "common": {"kind": "smoke", "epochs": 2, "max_train_batches": 3, "eval_limit": 32,
+                               "dataset": "WN18RR", "data_root": str(self.base / "data")},
                     "jobs": [{"job_id": f"smoke-{model}", "stage": "smoke", "model": model}
                              for model in queue.MODELS]}
         queue.save_json(self.plan, self.raw)
@@ -80,23 +81,27 @@ class WN9V2QueueTests(unittest.TestCase):
                 value = lambda flag: self.command[self.command.index(flag) + 1]
                 run_dir = Path(value("--run-dir"))
                 run_dir.mkdir()
-                (run_dir / "best.pt").write_bytes(b"synthetic checkpoint")
-                if outer.mode == "timeout":
+                (run_dir / "last.pt").write_bytes(b"synthetic last checkpoint")
+                if outer.mode != "timeout_no_best":
+                    (run_dir / "best.pt").write_bytes(b"synthetic checkpoint")
+                if outer.mode in ("timeout", "timeout_no_best"):
                     raise subprocess.TimeoutExpired(self.command, timeout)
                 if outer.mode == "interrupt":
                     raise KeyboardInterrupt("synthetic interruption")
-                config = {**queue.DEFAULTS, "model": value("--model")}
+                config = {**queue.DEFAULTS, "model": value("--model"), "dataset": value("--dataset"), "data_root": value("--data-root")}
                 for key, default in queue.DEFAULTS.items():
                     flag = "--" + key.replace("_", "-")
                     if flag in self.command:
                         config[key] = (int if default is None else type(default))(value(flag))
-                count = min(config["eval_limit"] or 1337, 1337)
-                indices = list(range(count))
+                entities, relations, train_count, valid_count, test_count = queue.DATASETS[config["dataset"]]
+                count = min(config["eval_limit"] or valid_count, valid_count)
+                offset = 17 if config["dataset"] == "FB15k-237" and count < valid_count else 0
+                indices = list(range(offset, offset + count))
                 backend = config["log_backend"]
                 terms = 12 if backend == "gregory12" else config["log_order"]
                 diagnostic = {"geometry": config["model"], "log_backend": backend,
                               "sampled_health_passed": True,
-                              "model_contract": {"log_backend": backend, "log_terms": terms}}
+                              "model_contract": {"log_backend": backend, "log_terms": terms, "entity_bias": False, "distance_power": 1, "dimension": 63}}
                 if config["model"] == "sl8":
                     diagnostic["principal_log"] = {"backend": backend}
                 result = {"status": "completed_validation_only", "test_evaluated": False,
@@ -104,21 +109,35 @@ class WN9V2QueueTests(unittest.TestCase):
                           "training_negative_filter": "train_only_directional",
                           "validation_filter": "all_splits_directional", "tie_policy": "realistic_average",
                           "negative_sampling": "uniform_without_replacement_per_triple",
-                          "score_distance_power": 1, "optimizer": "Adagrad", "dataset": "WN9-IMG",
+                          "score_distance_power": 1, "optimizer": "Adagrad", "dataset": config["dataset"],
                           "log_backend": backend, "log_terms": terms,
                           "initial_diagnostics": diagnostic,
                           "last_epoch": {"diagnostics": diagnostic},
                           "best_checkpoint_diagnostics": diagnostic,
-                          "config": config, "best_validation_mrr": .4, "best_epoch": 1,
-                          "completed_epochs": config["epochs"], "training_complete": config["kind"] == "pilot",
-                          "validation_scope": "full" if count == 1337 else "subset",
-                          "validation_count": count, "validation_total_count": 1337,
+                          "config": config, "best_validation_mrr": .4, "best_epoch": config["epochs"],
+                          "completed_epochs": config["epochs"], "training_complete": config["max_train_batches"] is None or config["max_train_batches"] >= (train_count + config["batch_size"] - 1) // config["batch_size"],
+                          "validation_scope": "full" if count == valid_count else "subset",
+                          "validation_count": count, "validation_total_count": valid_count,
                           "validation_indices": indices,
                           "subset_indices_hash": hashlib.sha256(struct.pack("<" + "q" * count, *indices)).hexdigest(),
                           **outer.result_changes}
+                full_batches = (train_count + config["batch_size"] - 1) // config["batch_size"]
+                batches = min(config["max_train_batches"] or full_batches, full_batches)
+                validation_epochs = [e for e in range(1, config["epochs"] + 1) if e % config["eval_every"] == 0 or e == config["epochs"]]
+                events = [{"epoch": e, "train_batches": batches,
+                           "train_examples": min(train_count, batches * config["batch_size"]),
+                           "validation": {"evaluated_triples": count, "directional_queries": 2 * count, "num_entities": entities}
+                           if e in validation_epochs else None} for e in range(1, config["epochs"] + 1)]
+                (run_dir / "epochs.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+                result.update(num_entities=entities, num_relations=relations, train_count=train_count,
+                              split_sizes=[train_count, valid_count, test_count], validation_epochs=validation_epochs,
+                              total_optimizer_steps=batches * config["epochs"], entity_bias=False, coordinate_dim=63,
+                              parameters_trainable=(entities + relations) * 63 + 2, parameters_total=(entities + relations) * 63 + 2,
+                              dataset_commit="2e440e0f9c687314d5ff67ead68ce985dc446e3a",
+                              dataset_provenance={"dataset":config["dataset"],"commit":"2e440e0f9c687314d5ff67ead68ce985dc446e3a"})
                 queue.save_json(run_dir / "result.json", result)
                 if outer.mode == "source_change":
-                    (outer.root / "scripts/run_wn9_geometry_v2.py").write_text("# changed source\n")
+                    (outer.root / "scripts/run_structural_geometry.py").write_text("# changed source\n")
                 if outer.mode == "stop_after_current":
                     (outer.root / "runs/trial/STOP_AFTER_CURRENT").touch()
                 self.returncode = 0
@@ -149,7 +168,7 @@ class WN9V2QueueTests(unittest.TestCase):
             self.assertGreater(child.last_timeout, 0)
             self.assertLess(child.last_timeout, 900)
             if not child.backup:
-                self.assertTrue(child.command[2].endswith("run_wn9_geometry_v2.py"))
+                self.assertTrue(child.command[2].endswith("run_structural_geometry.py"))
                 self.assertIn("--validation-only", child.command)
         for job in state["jobs"]:
             self.assertEqual(job["backup_status"], "completed")
@@ -219,7 +238,7 @@ class WN9V2QueueTests(unittest.TestCase):
         for changes in ({"final_test": None}, {"test_evaluated": True}, {"evaluation_protocol": "old"},
                         {"tie_policy": "ascending_id"}, {"validation_scope": "full"},
                         {"subset_indices_hash": "bad"}, {"best_validation_mrr": float("inf")},
-                        {"score_distance_power": 2}, {"dataset": "WN18RR"}, {"optimizer": "Adam"},
+                        {"score_distance_power": 2}, {"dataset": "WN9-IMG"}, {"optimizer": "Adam"},
                         {"log_backend": "gauss_legendre"}, {"log_terms": 16},
                         {"config": {**original_result["config"], "lr": 9.0}}):
             with self.subTest(changes=changes):
@@ -227,16 +246,12 @@ class WN9V2QueueTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     queue.checked_result(run, original_job)
 
-    def test_gl_requires_explicit_backend_and_records_effective_order(self):
+    def test_gl_is_rejected_in_this_gregory_only_queue(self):
         self.raw["common"].update(log_backend="gauss_legendre", log_order=32)
         queue.save_json(self.plan, self.raw)
-        self.assertEqual(self.execute(), 0)
-        for job in self.state()["jobs"]:
-            self.assertEqual(job["validated_result"]["log_backend"], "gauss_legendre")
-            self.assertEqual(job["validated_result"]["log_terms"], 32)
-        for child in self.children:
-            if not child.backup:
-                self.assertEqual(child.command[child.command.index("--log-backend") + 1], "gauss_legendre")
+        with self.assertRaises(ValueError):
+            self.execute()
+        self.assertEqual(self.children, [])
 
     def test_missing_or_cross_backend_model_diagnostics_are_rejected(self):
         self.assertEqual(self.execute(), 0)
@@ -269,7 +284,7 @@ class WN9V2QueueTests(unittest.TestCase):
             queue.load_plan(self.plan, queue.parse_utc(self.deadline))
 
     def test_command_parses_with_real_trainer_and_resolves_same_settings(self):
-        spec = importlib.util.spec_from_file_location("wn9_v2_real_parser", ROOT / "scripts/run_wn9_geometry_v2.py")
+        spec = importlib.util.spec_from_file_location("structural_real_parser", ROOT / "scripts/run_structural_geometry.py")
         runner = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(runner)
         _, jobs = queue.load_plan(self.plan, queue.parse_utc(self.deadline))
@@ -277,9 +292,61 @@ class WN9V2QueueTests(unittest.TestCase):
             command = queue.runner_command(self.root, self.base / "unused", job["config"])
             parsed = runner.parse_args(command[3:])
             self.assertTrue(parsed.validation_only)
-            self.assertTrue(all(getattr(parsed, key) == value for key, value in job["config"].items()))
-        default_parsed = runner.parse_args(["--root", str(self.root), "--run-dir", str(self.base / "unused"), "--model", "sl8"])
+            self.assertTrue(all((str(getattr(parsed, key)) if isinstance(getattr(parsed, key), Path)
+                                 else getattr(parsed, key)) == value for key, value in job["config"].items()))
+        default_parsed = runner.parse_args(["--root", str(self.root), "--run-dir", str(self.base / "unused"), "--model", "sl8", "--dataset", "WN18RR", "--data-root", str(self.base / "data")])
         self.assertTrue(all(getattr(default_parsed, key) == value for key, value in queue.DEFAULTS.items()))
+
+    def test_actual_smoke_and_profile_plans_parse_with_real_trainer(self):
+        spec = importlib.util.spec_from_file_location("structural_real_plan_parser", ROOT / "scripts/run_structural_geometry.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        for filename, count in (("structural_geometry_smoke.json", 6), ("structural_geometry_profile.json", 2)):
+            _, jobs = queue.load_plan(ROOT / "experiments" / filename,
+                                     queue.parse_utc("2026-09-06T12:17:36Z"), ROOT)
+            self.assertEqual(len(jobs), count)
+            for job in jobs:
+                parsed = runner.parse_args(queue.runner_command(ROOT, self.base / "unused", job["config"])[3:])
+                self.assertEqual(str(parsed.data_root), job["config"]["data_root"])
+                self.assertEqual(parsed.dataset, job["config"]["dataset"])
+                self.assertEqual(parsed.log_backend, "gregory12")
+
+    def test_both_datasets_keep_different_subset_hashes_without_false_mismatch(self):
+        extra = [{**job, "job_id": "fb-" + job["job_id"], "dataset": "FB15k-237"} for job in self.raw["jobs"]]
+        self.raw["jobs"] += extra
+        queue.save_json(self.plan, self.raw)
+        self.assertEqual(self.execute(), 0)
+        rows = self.state()["jobs"]
+        self.assertEqual(len(rows), 6)
+        self.assertNotEqual(rows[0]["validated_result"]["subset_indices_hash"], rows[3]["validated_result"]["subset_indices_hash"])
+        self.assertEqual(rows[0]["validated_result"]["validation_total_count"], 3034)
+        self.assertEqual(rows[3]["validated_result"]["validation_total_count"], 17535)
+
+    def test_optimizer_steps_and_validation_cadence_are_verified(self):
+        self.assertEqual(self.execute(), 0)
+        job = self.state()["jobs"][0]
+        run_dir = Path(job["run_dir"])
+        original = json.loads((run_dir / "result.json").read_text())
+        for changes in ({"total_optimizer_steps": 1}, {"validation_epochs": [1, 2]},
+                        {"training_complete": True}, {"split_sizes": [1, 3034, 3134]},
+                        {"parameters_trainable": 999}, {"entity_bias": True}):
+            queue.save_json(run_dir / "result.json", {**original, **changes})
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                queue.checked_result(run_dir, job)
+        queue.save_json(run_dir / "result.json", original)
+        events = [json.loads(line) for line in (run_dir / "epochs.jsonl").read_text().splitlines()]
+        events[0]["train_batches"] = 1
+        (run_dir / "epochs.jsonl").write_text("\n".join(json.dumps(event) for event in events) + "\n")
+        with self.assertRaises(ValueError):
+            queue.checked_result(run_dir, job)
+
+    def test_interrupt_before_first_validation_salvages_last_checkpoint(self):
+        self.mode = "timeout_no_best"
+        self.assertEqual(self.execute(), 124)
+        copied = self.backup / "trial/smoke-euclidean-partial"
+        self.assertTrue((copied / "last.pt").is_file())
+        self.assertFalse((copied / "best.pt").exists())
+        self.assertEqual(self.state()["validation_records"], [])
 
     def test_existing_queue_and_lock_are_never_overwritten(self):
         self.assertEqual(self.execute(), 0)
@@ -335,7 +402,7 @@ class WN9V2QueueTests(unittest.TestCase):
         log.write_text("synthetic log\n")
         state.write_text("{}")
         destination = self.base / "copied"
-        command = [sys.executable, str(ROOT / "scripts/run_wn9_geometry_v2_queue.py"), "--_backup-worker",
+        command = [sys.executable, str(ROOT / "scripts/run_structural_geometry_queue.py"), "--_backup-worker",
                    str(source), str(log), str(destination), str(state)]
         subprocess.run(command, check=True, capture_output=True, timeout=10)
         self.assertTrue((destination / "best.pt").is_file())

@@ -13,6 +13,8 @@ Author commit: `c78994e14cf2dfda251b701c2803215d9d5fe254`.
 - **VL-DistMult + SL(8) residual**, with a parameter-matched Euclidean residual (paused).
 - **WN9 geometry v2**: equal-capacity 63-coordinate Euclidean, Poincare and
   SL(8) heads with linear distance scores and matched initialization.
+- **Structural KG controls** on pinned WN18RR and FB15k-237: direct 63-D
+  ID tables, matched parameter counts, and the original shared Gregory-12.
 - Unit/integration tests, validation-only HPO manifests and a bounded queue executor.
 - A vendored source snapshot of the shared SL manifold core.
 - [Results and interpretation limits](RESULTS.md), [HPO plan](experiments/SL_HPO_PLAN.md),
@@ -47,7 +49,7 @@ The residual queue was stopped and backed up on September 6, 2026. Its
 0.80284538 at epoch 18, versus 0.81420922 for original DistMult at that
 same epoch. No final test scoring was performed in this queue.
 
-The current study is [WN9 geometry v2](experiments/WN9_GEOMETRY_V2.md):
+The previous study was [WN9 geometry v2](experiments/WN9_GEOMETRY_V2.md):
 `b - alpha * D`, radius 1.5/2.0, 63-coordinate heads and equal trainable
 parameter counts. The initial entity median and every relation norm are
 0.5. Frozen visual/text features are retained; the upstream 768-D structural
@@ -55,6 +57,15 @@ entity table and shared 63-D projection remain trainable. V2 uses a new
 strict directional filtering protocol and therefore cannot be compared
 directly against the earlier author-release 0.93509 result. Unit tests and
 an executable six-job smoke plan are included; a plan is not a training result.
+
+On September 6 the WN9 GL16 queue was stopped and its completed/partial
+checkpoints backed up. The current study is the
+[structural geometry experiment](experiments/STRUCTURAL_GEOMETRY.md) on
+WN18RR and FB15k-237. It restores the unchanged shared Gregory-12 scorer,
+retains radius 1.5/2, linear distance and same-scale initialization, and removes
+multimodal features. Small-sample reference errors remain separate from
+finite-value health checks. GPU timing must be read before starting a
+matched screen; no new validation/test performance is claimed here.
 
 ## Setup
 
@@ -102,8 +113,14 @@ source, but use tiny CPU data and do not need a GPU.
 These commands start training only when deliberately invoked. Run serially
 on a free GPU and choose an explicit compute budget for any search.
 
-For the current geometry-only study, use `scripts/run_wn9_geometry_v2.py`
-and `scripts/run_wn9_geometry_v2_queue.py`. The recorded smoke manifest is
+For the current structural study, use `scripts/run_structural_geometry.py`
+and `scripts/run_structural_geometry_queue.py`, with the smoke/profile plans
+and compute gates in [STRUCTURAL_GEOMETRY.md](experiments/STRUCTURAL_GEOMETRY.md).
+The queue only accepts Gregory-12, uses one fixed UTC deadline, and backs up
+each trial. Validation-only screen trials use complete datasets, not subsets.
+
+For the previous WN9 study, use `scripts/run_wn9_geometry_v2.py`
+and `scripts/run_wn9_geometry_v2_queue.py`. Its historical smoke manifest is
 `experiments/wn9_geometry_v2_smoke.json`; its fixed September 6 UTC deadline
 must match the queue argument. It intentionally expires rather than
 silently granting another budget. Only smoke permits truncated training

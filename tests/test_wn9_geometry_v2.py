@@ -8,6 +8,8 @@ sys.path[:0] = [str(ROOT), str(ROOT / "upstream/vl-kge"), str(ROOT / "vendor/sl-
 import torch
 from geometry.wn9_geometry_v2 import WN9GeometryV2
 from geometry.matrix_log import checked_symmetric_log_distance, log_pair_diagnostics
+from geometry.gregory_diagnostics import gregory_pair_diagnostics
+from sl_manifold.core import symmetric_distance
 
 
 class WN9V2Tests(unittest.TestCase):
@@ -85,6 +87,44 @@ class WN9V2Tests(unittest.TestCase):
         self.assertFalse(diagnostics['cayley_warning_is_fatal'])
         self.assertFalse(diagnostics['passed'])  # The actual principal branch is invalid.
         json.dumps(diagnostics, allow_nan=False)
+
+    def test_default_gregory_exact_old_linear_kernel_and_no_hotpath_gl(self):
+        from unittest.mock import patch
+        m = self.make('sl8'); m.initialize_geometry(torch.arange(6))
+        self.assertEqual(m.log_backend, 'gregory12')
+        h,r,t = self.ids(); _,hm=m.get_geometry_representations(h); _,tm=m.get_geometry_representations(t)
+        rm=m.get_relation_representations(r)
+        expected=m.score_offset-m.logit_scale*symmetric_distance(rm@hm,tm,terms=12,jitter=1e-7,trace_project=True)
+        with patch('geometry.wn9_geometry_v2.checked_symmetric_log_distance', side_effect=AssertionError('GL hot path called')):
+            torch.testing.assert_close(m(h,r,t),expected,rtol=0,atol=0)
+        d=m.diagnostics(h,r,t)
+        self.assertEqual(d['principal_log']['backend'],'gregory12')
+        self.assertTrue(d['principal_log']['scipy_reference_used'])
+        self.assertEqual(len(d['principal_log']['per_pair_accuracy']),len(h))
+        with self.assertRaises(ValueError): m.diagnostics()
+
+    def test_gregory_nonfatal_cayley_and_accuracy_are_distinct(self):
+        import json
+        identity=torch.eye(8);valid=identity.clone();valid[0,1]=4.
+        d=gregory_pair_diagnostics(identity,valid)
+        self.assertGreater(d['max_cayley_spectral_norm'],1)
+        self.assertTrue(d['passed'])
+        self.assertTrue(d['reference_accuracy_passed'])
+        self.assertFalse(d['cayley_warning_is_fatal'])
+        large=torch.diag(torch.tensor([100.,.01,1.,1.,1.,1.,1.,1.]))
+        d=gregory_pair_diagnostics(identity,large)
+        self.assertTrue(d['passed'])
+        self.assertFalse(d['reference_accuracy_passed'])
+        self.assertFalse(d['reference_accuracy_failure_is_fatal'])
+        json.dumps(d,allow_nan=False)
+
+    def test_explicit_gauss_legendre_still_available(self):
+        m=self.make('sl8',log_backend='gauss_legendre')
+        m.initialize_geometry(torch.arange(6))
+        m(*self.ids()).mean().backward()
+        d=m.diagnostics(*self.ids(),scipy_reference=True)
+        self.assertTrue(d['sampled_health_passed'])
+        self.assertEqual(d['principal_log']['backend'],'gauss_legendre')
 
 
 if __name__=='__main__':

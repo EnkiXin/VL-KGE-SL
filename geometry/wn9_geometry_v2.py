@@ -10,9 +10,10 @@ log Frobenius discrepancy, not a globally defined Riemannian geodesic.
 import math
 import torch
 
-from sl_manifold.core import algebra_exp, coordinates_to_algebra
+from sl_manifold.core import algebra_exp, coordinates_to_algebra, symmetric_distance
 from .models import VLGeometry, mobius_add, poincare_exp0
 from .matrix_log import quadrature_rule, checked_symmetric_log_distance, log_pair_diagnostics
+from .gregory_diagnostics import gregory_pair_diagnostics
 
 
 class WN9GeometryV2(VLGeometry):
@@ -20,9 +21,11 @@ class WN9GeometryV2(VLGeometry):
 
     def __init__(self, *, geometry="sl8", coordinate_scale=1.0, chart_radius=1.5,
                  initial_logit_scale=1.0, initial_offset=0.0, score_chunk=1024,
-                 checkpoint_blocks=True, log_order=16, **author_base_kwargs):
+                 checkpoint_blocks=True, log_order=16, log_backend="gregory12", **author_base_kwargs):
         if geometry not in self.GEOMETRIES or log_order not in (16, 32):
             raise ValueError("unknown geometry or quadrature order (must be16/32)")
+        if log_backend not in ("gregory12", "gauss_legendre"):
+            raise ValueError("log_backend must be gregory12 or gauss_legendre")
         if any(not math.isfinite(v) or v <= 0 for v in (coordinate_scale, chart_radius)):
             raise ValueError("coordinate_scale/chart_radius must be finite positive")
         if not math.isfinite(initial_offset):
@@ -33,6 +36,7 @@ class WN9GeometryV2(VLGeometry):
                          initial_offset=initial_offset, score_chunk=score_chunk,
                          checkpoint_blocks=checkpoint_blocks, **author_base_kwargs)
         self.geometry, self.log_order = geometry, log_order
+        self.log_backend = log_backend
         device, dtype = self.projection.weight.device, self.projection.weight.dtype
         nodes, weights = quadrature_rule(log_order, dtype=dtype, device=device)
         self.register_buffer("quadrature_nodes", nodes, persistent=False)
@@ -95,6 +99,9 @@ class WN9GeometryV2(VLGeometry):
 
     def _distance_block(self, head_coord, head, relation, diagonal, tail):
         if self.geometry == "sl8":
+            if self.log_backend == "gregory12":
+                return symmetric_distance(relation @ head, tail, terms=12,
+                                          jitter=1e-7, trace_project=True)
             return checked_symmetric_log_distance(relation @ head, tail, order=self.log_order,
                                                    nodes=self.quadrature_nodes, weights=self.quadrature_weights)
         if self.geometry == "hyperbolic":
@@ -118,6 +125,9 @@ class WN9GeometryV2(VLGeometry):
                     sample_size=32, scipy_reference=False, raise_on_failure=True):
         if not bool(self.geometry_initialized):
             raise RuntimeError("initialize geometry before diagnostics")
+        if self.geometry == "sl8" and self.log_backend == "gregory12" and (
+                train_head is None or train_relation is None or train_tail is None):
+            raise ValueError("Gregory accuracy diagnostics require a caller-supplied fixed training triple probe")
         device = self.projection.weight.device
         if train_head is None and train_relation is None and train_tail is None:
             size = min(sample_size, self.num_entities)
@@ -139,10 +149,13 @@ class WN9GeometryV2(VLGeometry):
             raise FloatingPointError("nonfinite WN9 geometry parameter/distance")
         result = {
             "geometry": self.geometry, "sample_scope": scope, "sample_size": len(head),
+            "log_backend": self.log_backend,
             "model_contract": {"family": "wn9_geometry_v2", "dimension": 63,
                                "score": "offset-alpha*distance", "distance_power": 1,
                                "entity_bias": False, "relation_diagonal": False,
-                               "relation_action": "left", "hyperbolic_metric_multiplier": 0.5},
+                               "relation_action": "left", "hyperbolic_metric_multiplier": 0.5,
+                               "log_backend": self.log_backend,
+                               "log_terms": 12 if self.log_backend == "gregory12" else self.log_order},
             "chart_radius": self.chart_radius, "coordinate_scale": self.coordinate_scale,
             "initialization_target_norm": float(self.initialization_target_norm),
             "initialization_train_entity_count": int(self.initialization_train_entity_count),
@@ -155,9 +168,16 @@ class WN9GeometryV2(VLGeometry):
             "distance_max": float(delta.max()), "distance_std": float(delta.std(unbiased=False)),
             "parameters_finite": True, "sampled_health_passed": True}
         if self.geometry == "sl8":
-            result["principal_log"] = log_pair_diagnostics(r @ h, t, order=self.log_order,
-                                                            scipy_reference=scipy_reference,
-                                                            raise_on_failure=raise_on_failure)
+            if self.log_backend == "gregory12":
+                result["principal_log"] = gregory_pair_diagnostics(r @ h, t)
+                result["sampled_reference_accuracy_passed"] = result["principal_log"]["reference_accuracy_passed"]
+                result["sampled_health_scope"] = "finite_values_and_solves; reference_accuracy_reported_separately"
+                result["training_probe_triples"] = torch.stack((head, relation, tail), dim=1).cpu().tolist()
+            else:
+                result["principal_log"] = log_pair_diagnostics(r @ h, t, order=self.log_order,
+                                                                scipy_reference=scipy_reference,
+                                                                raise_on_failure=raise_on_failure)
+                result["principal_log"]["backend"] = "gauss_legendre"
             result["sampled_health_passed"] = result["principal_log"]["passed"]
             sign, logdet = torch.linalg.slogdet(torch.cat((h, r, t)))
             result["max_sample_group_abs_logdet"] = float(logdet.abs().max())
