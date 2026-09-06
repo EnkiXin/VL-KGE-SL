@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "status": "explicit_six_job_screen_requires_completed_profile_and_remaining_time_gate",
+  "deadline_utc": "2026-09-06T12:17:36Z",
+  "selection_metric": "best_full_validation_mrr",
+  "test_scoring_allowed": false,
+  "purpose": "Complete matched three-geometry controls on two structural datasets. This is a 20-epoch pilot, not a convergence claim or large HPO.",
+  "scope_decision": "The original tentative 12 x 15-epoch scope extrapolated to more than the remaining budget. Fix radius 2.0 for the first six matched jobs, 20 epochs each; radius 1.5 remains implemented but is not queued here. Do not extend the inherited deadline. Launch only after full SL profiles and an explicit conservative remaining-time check.",
+  "common": {
+    "data_root": "data/structural", "kind": "pilot", "epochs": 20, "eval_every": 5,
+    "patience": 50, "seed": 42, "lr": 0.01,
+    "chart_radius": 2.0, "target_init_norm": 0.5,
+    "initial_logit_scale": 1.0, "initial_offset": 0.0,
+    "batch_size": 512, "negatives": 100, "score_chunk": 1024,
+    "query_batch": 32, "candidate_chunk": 256, "grad_clip": 5.0,
+    "log_backend": "gregory12", "validation_seed": 260906
+  },
+  "jobs": [
+    {"job_id": "wn18rr-r20-sl8-lr001-s42", "dataset": "WN18RR", "stage": "screen", "model": "sl8"},
+    {"job_id": "wn18rr-r20-euclidean-lr001-s42", "dataset": "WN18RR", "stage": "screen", "model": "euclidean"},
+    {"job_id": "wn18rr-r20-hyperbolic-lr001-s42", "dataset": "WN18RR", "stage": "screen", "model": "hyperbolic"},
+    {"job_id": "fb237-r20-sl8-lr001-s42", "dataset": "FB15k-237", "stage": "screen", "model": "sl8"},
+    {"job_id": "fb237-r20-euclidean-lr001-s42", "dataset": "FB15k-237", "stage": "screen", "model": "euclidean"},
+    {"job_id": "fb237-r20-hyperbolic-lr001-s42", "dataset": "FB15k-237", "stage": "screen", "model": "hyperbolic"}
+  ]
+}
