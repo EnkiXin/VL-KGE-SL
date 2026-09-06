@@ -11,7 +11,7 @@ Author commit: `c78994e14cf2dfda251b701c2803215d9d5fe254`.
 - Author-release reproduction wrappers and input integrity checks.
 - Geometry v1: pure SL(8), adapted MuRP/MuRE, and Euclidean translation scorers.
 - New **VL-DistMult + SL(8) residual**, with a parameter-matched Euclidean residual.
-- Unit/integration tests and a reproducible, validation-only HPO plan generator.
+- Unit/integration tests, validation-only HPO manifests and a bounded queue executor.
 - A vendored source snapshot of the shared SL manifold core.
 - [Results and interpretation limits](RESULTS.md), [HPO plan](experiments/SL_HPO_PLAN.md),
   and [third-party provenance](THIRD_PARTY.md).
@@ -35,10 +35,13 @@ The original WN9 author models were reproduced: test MRR 0.9350893979
 Geometry v1 has also completed; SL test MRR is 0.8899170687, still below
 the original DistMult. See [RESULTS.md](RESULTS.md).
 
-The **new DistMult + SL residual has only been checked locally on CPU**,
-including integration with the actual author training/evaluation functions.
-It has no formal GPU ranking results yet. The prepared HPO plan is not a
-running queue and does not authorize or launch paid compute.
+The **new DistMult + SL residual passes CPU integration tests and a short
+RTX 4090 preflight** (three optimizer updates and 32 full-candidate validation
+queries). No out-of-memory or sampled numerical-health failures occurred in
+that preflight; this is not evidence of full-run accuracy or universal safety.
+Original DistMult and the Euclidean residual also completed two-epoch GPU
+validation-only checks. Formal residual HPO results are still pending.
+Generating manifests does not start training; the queue command below does.
 
 ## Setup
 
@@ -100,6 +103,17 @@ python scripts/run_distmult_sl_author.py --repo upstream/vl-kge \
 # Prepare 18 matched anchor experiments. This DOES NOT start training.
 python scripts/plan_distmult_sl_hpo.py --stage anchors \
   --out experiments/prepared/anchors-v1
+
+# Prepare a three-method, two-epoch profile, then deliberately launch both
+# stages under ONE eight-hour deadline. Use a new queue ID and a separate
+# persistent backup directory. This command consumes GPU time.
+python scripts/plan_distmult_sl_hpo.py --stage profile \
+  --out experiments/prepared/profile-v1
+python scripts/run_distmult_sl_queue.py --root "$PWD" \
+  --manifest experiments/prepared/profile-v1/manifest.json \
+             experiments/prepared/anchors-v1/manifest.json \
+  --queue-id distmult-sl-anchors-v1 --max-hours 8 \
+  --backup-root /path/to/persistent/results
 ```
 
 The new launcher accepts `--method baseline`, `euclidean`, or `sl8`.
@@ -108,6 +122,13 @@ HPO overrides are restricted to the author's `lr`, `batch_size`,
 In validation-only mode it intercepts the final test call after the author
 reloads its best checkpoint, before test scores are computed. It does not
 invent substitute test metrics.
+
+The executor runs the three profiles first; only successful, test-free
+completion permits the 18 anchor trials to follow. It uses one GPU lock,
+stops on failed trials/backups or the shared deadline, and refuses existing
+queue directories. Each completed trial's checkpoint and metadata are copied
+to the separate backup directory. A finite budget does not guarantee that all
+trials finish, and stopping this program does not stop rental billing.
 
 ## Important limitations
 
