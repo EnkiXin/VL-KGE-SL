@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "deadline_utc": "2026-09-06T12:17:36Z",
+  "common": {
+    "kind": "smoke", "epochs": 1, "seed": 42, "lr": 0.01,
+    "coordinate_scale": 1.0, "target_init_norm": 0.5,
+    "initial_logit_scale": 1.0, "initial_offset": 0.0,
+    "batch_size": 512, "negatives": 100,
+    "score_chunk": 1024, "query_batch": 32, "candidate_chunk": 256,
+    "grad_clip": 5.0, "log_order": 16, "validation_seed": 260906,
+    "max_train_batches": 3, "eval_limit": 32
+  },
+  "jobs": [
+    {"job_id": "sl8-r15-smoke", "stage": "smoke", "model": "sl8", "chart_radius": 1.5},
+    {"job_id": "euclidean-r15-smoke", "stage": "smoke", "model": "euclidean", "chart_radius": 1.5},
+    {"job_id": "hyperbolic-r15-smoke", "stage": "smoke", "model": "hyperbolic", "chart_radius": 1.5},
+    {"job_id": "sl8-r20-smoke", "stage": "smoke", "model": "sl8", "chart_radius": 2.0},
+    {"job_id": "euclidean-r20-smoke", "stage": "smoke", "model": "euclidean", "chart_radius": 2.0},
+    {"job_id": "hyperbolic-r20-smoke", "stage": "smoke", "model": "hyperbolic", "chart_radius": 2.0}
+  ]
+}

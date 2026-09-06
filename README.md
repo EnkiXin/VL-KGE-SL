@@ -10,7 +10,9 @@ Author commit: `c78994e14cf2dfda251b701c2803215d9d5fe254`.
 
 - Author-release reproduction wrappers and input integrity checks.
 - Geometry v1: pure SL(8), adapted MuRP/MuRE, and Euclidean translation scorers.
-- New **VL-DistMult + SL(8) residual**, with a parameter-matched Euclidean residual.
+- **VL-DistMult + SL(8) residual**, with a parameter-matched Euclidean residual (paused).
+- **WN9 geometry v2**: equal-capacity 63-coordinate Euclidean, Poincare and
+  SL(8) heads with linear distance scores and matched initialization.
 - Unit/integration tests, validation-only HPO manifests and a bounded queue executor.
 - A vendored source snapshot of the shared SL manifold core.
 - [Results and interpretation limits](RESULTS.md), [HPO plan](experiments/SL_HPO_PLAN.md),
@@ -39,9 +41,20 @@ The **new DistMult + SL residual passes CPU integration tests and a short
 RTX 4090 preflight** (three optimizer updates and 32 full-candidate validation
 queries). No out-of-memory or sampled numerical-health failures occurred in
 that preflight; this is not evidence of full-run accuracy or universal safety.
-Original DistMult and the Euclidean residual also completed two-epoch GPU
-validation-only checks. Formal residual HPO results are still pending.
-Generating manifests does not start training; the queue command below does.
+The residual queue was stopped and backed up on September 6, 2026. Its
+30-epoch anchor validation MRRs were 0.88957125 (original DistMult) and
+0.88967874 (Euclidean residual). The interrupted SL residual reached
+0.80284538 at epoch 18, versus 0.81420922 for original DistMult at that
+same epoch. No final test scoring was performed in this queue.
+
+The current study is [WN9 geometry v2](experiments/WN9_GEOMETRY_V2.md):
+`b - alpha * D`, radius 1.5/2.0, 63-coordinate heads and equal trainable
+parameter counts. The initial entity median and every relation norm are
+0.5. Frozen visual/text features are retained; the upstream 768-D structural
+entity table and shared 63-D projection remain trainable. V2 uses a new
+strict directional filtering protocol and therefore cannot be compared
+directly against the earlier author-release 0.93509 result. Unit tests and
+an executable six-job smoke plan are included; a plan is not a training result.
 
 ## Setup
 
@@ -89,6 +102,14 @@ source, but use tiny CPU data and do not need a GPU.
 These commands start training only when deliberately invoked. Run serially
 on a free GPU and choose an explicit compute budget for any search.
 
+For the current geometry-only study, use `scripts/run_wn9_geometry_v2.py`
+and `scripts/run_wn9_geometry_v2_queue.py`. The recorded smoke manifest is
+`experiments/wn9_geometry_v2_smoke.json`; its fixed September 6 UTC deadline
+must match the queue argument. It intentionally expires rather than
+silently granting another budget. Only smoke permits truncated training
+or validation; pilots use all training batches and all 1,337 validation
+triples. Neither mode evaluates test. Historical residual commands follow.
+
 ```bash
 # Original author model, unchanged training/evaluation.
 python scripts/run_author.py --repo upstream/vl-kge \
@@ -135,9 +156,11 @@ trials finish, and stopping this program does not stop rental billing.
 - Reproduction retains the author's all-split, mixed-direction filtering,
   including its use during negative sampling. A stricter study must apply
   corrections to all models and retrain them consistently.
-- SL scoring uses a Gregory-12 **local matrix-log approximation**, not an
-  exact global geodesic distance. Sampled diagnostics are not a proof of
-  safety for every entity pair.
+- Geometry v1/residual SL scoring uses Gregory-12. Geometry v2 instead uses
+  fixed-order Gauss-Legendre principal-log quadrature, with spectrum and
+  exponential-reconstruction checks on actual scoring blocks. Neither is
+  claimed to be an exact global geodesic or a complete adaptive matrix-log
+  algorithm. Legacy Cayley norm warnings are nonfatal in v2.
 - Residual calibration uses training positives and train-filtered negatives
   only. Its center and scale are frozen; a radius-based scale floor guards
   against early saturation. Saturation statistics are recorded each epoch.
@@ -145,5 +168,5 @@ trials finish, and stopping this program does not stop rental billing.
   from scratch rather than claiming bitwise-equivalent resumed training.
 - Best-checkpoint selection and HPO use validation, not test scores. Report
   multiple seeds and matched-capacity controls before making superiority claims.
-- Original author results, old geometry v1, and the new hybrid are separate
+- Original author results, old geometry v1, the hybrid and geometry v2 are separate
   tracks; do not mix their metrics or protocol labels.
