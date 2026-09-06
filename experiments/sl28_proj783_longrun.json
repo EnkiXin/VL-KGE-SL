@@ -1,0 +1,61 @@
+{
+  "experiment": "wn9-sl28-proj783",
+  "dataset": "WN9-IMG",
+  "architecture": "author 768-D average fusion -> learned bias-free Linear(768,783) -> SL(28)",
+  "model": "slv2n28",
+  "embedding_dim": 768,
+  "matrix_dim": 28,
+  "entity_mapping": "linear",
+  "trainable_parameters": 5642633,
+  "search": {
+    "learning_rates": [0.003, 0.01, 0.03, 0.05, 0.1, 0.2],
+    "pilot_epochs_each": 10,
+    "selection": "highest pilot validation MRR; first configured learning rate wins ties",
+    "test_during_pilots": false
+  },
+  "formal": {
+    "initialization": "from scratch, not resumed from a pilot or old SL8 checkpoint",
+    "maximum_epochs": 200,
+    "patience_epochs": 50,
+    "validate_every_epochs": 5,
+    "final_test": "once, using the checkpoint selected by highest validation MRR"
+  },
+  "fixed_training": {
+    "seed": 42,
+    "optimizer": "Adagrad",
+    "batch_size": 512,
+    "negatives_per_positive": 100,
+    "gradient_clip_norm": 5.0,
+    "loss": "author logistic loss",
+    "negative_sampling": "author uniform sampling with author-release filters"
+  },
+  "fixed_geometry": {
+    "coordinate_scale": 0.1,
+    "chart_radius": 2.0,
+    "relation_radius": 1.5,
+    "relation_init_norm": 0.5,
+    "relation_mode": "left",
+    "score_form": "linear",
+    "initial_logit_scale": 3.0,
+    "initial_offset": 3.0,
+    "schatten_p": 2.0,
+    "log_sqrt_steps": 1,
+    "log_db_iterations": 6,
+    "log_terms": 12
+  },
+  "fixed_execution": {
+    "score_chunk": 2048,
+    "query_batch": 16,
+    "candidate_chunk": 512,
+    "gpu_count": 1,
+    "concurrent_training_jobs": 1,
+    "protocol": "author_release_protocol",
+    "automatic_completed_run_backup": true
+  },
+  "entrypoint": "scripts/run_v2_wn9.sh",
+  "queue_id": "geometry-v2-proj783-20260906-sl28-proj783",
+  "stop_old_experiments": true,
+  "original_authorized_end_utc": "2026-09-07T11:37:14.613583+00:00",
+  "guard_stop_at_utc": "2026-09-07T11:36:44.613583+00:00",
+  "budget_note": "Pass only remaining authorized hours as MAX_HOURS; do not reset to another 24-hour window. Queue budget also bounds a training child and final test."
+}

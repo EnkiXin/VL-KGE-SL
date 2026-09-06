@@ -1,0 +1,24 @@
+{
+  "experiment": "sl28-three-author-datasets-test-tuned",
+  "architecture": "author frozen CLIP features and entity table, 768-D average fusion -> trainable bias-free Linear(768,783) -> SL(28)",
+  "author_commit": "c78994e14cf2dfda251b701c2803215d9d5fe254",
+  "selection_split": "test",
+  "test_used_for_selection": true,
+  "evaluation_label": "test_tuned_not_held_out",
+  "reporting_note": "The user explicitly requested test-set hyperparameter and checkpoint selection. These maxima are exploratory test-tuned results, not independent held-out estimates or a protocol-matched reproduction of the paper's numbers.",
+  "learning_rate_execution_order": [0.03, 0.1, 0.01, 0.05, 0.003, 0.2],
+  "optimizer": "Adagrad",
+  "batch_size": 512,
+  "seed": 42,
+  "datasets": {
+    "wn9_img": {"pilot_epochs": 10, "formal_epochs": 200, "evaluate_every": 5, "negative_samples": 100, "bidirectional": true, "candidates": "all entities", "inductive": false, "modality_asymmetry": false},
+    "wikiart_mkg_v1": {"pilot_epochs": 5, "formal_epochs": 50, "evaluate_every": 1, "negative_samples": 1, "bidirectional": false, "candidates": "author relation-specific pools", "inductive": true, "modality_asymmetry": true},
+    "wikiart_mkg_v2": {"pilot_epochs": 2, "formal_epochs": 20, "evaluate_every": 1, "negative_samples": 1, "bidirectional": false, "candidates": "author relation-specific pools, split-local artist relations", "inductive": true, "modality_asymmetry": true, "downsample_relation": "isRelatedToArtwork", "downsample_fraction": 0.001, "inverse_relation_note": "Preserve the released malformed YAML's actual no-op behavior; do not silently add the inverse edges described in the README."}
+  },
+  "geometry": {"matrix_dim": 28, "embedding_dim": 768, "entity_mapping": "linear", "coordinate_scale": 0.1, "chart_radius": 2.0, "relation_radius": 1.5, "relation_init_norm": 0.5, "relation_mode": "left", "score_form": "linear", "initial_logit_scale": 3.0, "initial_offset": 3.0, "schatten_p": 2.0, "log_sqrt_steps": 1, "log_db_iterations": 6, "log_terms": 12},
+  "execution": {"gpu_jobs_at_once": 1, "score_chunk": 2048, "candidate_chunk": 512, "query_batch": 16, "gradient_clip": 5.0, "stage_order": ["wn9_img pilots", "wikiart_mkg_v1 pilots", "wikiart_mkg_v2 pilots", "wn9_img formal", "wikiart_mkg_v1 formal", "wikiart_mkg_v2 formal"], "remaining_time_weights": [1, 1, 1, 2, 2, 2], "partial_search": "If the phase budget expires, select only successfully completed pilots and explicitly record the incomplete search; never claim all combinations finished."},
+  "entrypoint": "scripts/run_sl28_three_datasets.py",
+  "original_authorized_end_utc": "2026-09-07T11:37:14.613583+00:00",
+  "guard_stop_at_utc": "2026-09-07T11:36:44.613583+00:00",
+  "budget_note": "All three datasets share the original 24-hour authorization, including previous work. This is not a fresh 24-hour allowance per dataset."
+}

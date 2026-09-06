@@ -19,10 +19,16 @@ URL = "https://github.com/thefth/vl-kge"
 COMMIT = "c78994e14cf2dfda251b701c2803215d9d5fe254"
 PATCH_SHA256 = "9fa2b64e292ce68e1a78683e593d77f78c8602edc4d95d9f7b96eb129622c96d"
 HELPERS = "vlkge/helpers.py"
-LFS_FILES = (
-    "vlkge/data/wn9_img/wn9_img_triples.csv",
-    "vlkge/data/wn9_img/features/wn9_img_vf_clip.pkl",
-    "vlkge/data/wn9_img/features/wn9_img_tf_clip.pkl",
+# Only the three pinned CLIP inputs per published dataset may be expanded.
+# Every expansion is independently checked against its committed LFS pointer.
+LFS_FILES = tuple(
+    relative
+    for dataset in ("wn9_img", "wikiart_mkg_v1", "wikiart_mkg_v2")
+    for relative in (
+        f"vlkge/data/{dataset}/{dataset}_triples.csv",
+        f"vlkge/data/{dataset}/features/{dataset}_vf_clip.pkl",
+        f"vlkge/data/{dataset}/features/{dataset}_tf_clip.pkl",
+    )
 )
 # Historical local observer documentation/tests may exist but are not changed.
 ALLOWED_UNTRACKED = {"REPRODUCTION.md", "requirements-reproduction.txt", "tests/test_reproduction_static.py"}

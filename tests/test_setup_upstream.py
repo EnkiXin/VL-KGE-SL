@@ -139,6 +139,25 @@ class SetupUpstreamTests(unittest.TestCase):
             setup.setup(self.root)
         git.assert_not_called()
 
+    def test_all_three_dataset_expansions_allowed_only_with_matching_hashes(self):
+        (self.repo / setup.HELPERS).write_bytes(setup.expected_patched_helpers(self.original))
+        for relative in setup.LFS_FILES:
+            (self.repo / relative).write_bytes(b"tiny test data")
+        self.status = "".join(f" M {relative}\0" for relative in setup.LFS_FILES).encode()
+        with patch.object(setup, "git", side_effect=self.fake_git):
+            result = setup.setup(self.root, check_only=True)
+        self.assertEqual(len(result["lfs_inputs"]), 9)
+        self.assertTrue(all(value == "expanded_and_verified" for value in result["lfs_inputs"].values()))
+        wikiart_path = next(relative for relative in setup.LFS_FILES if "wikiart_mkg_v2" in relative)
+        (self.repo / wikiart_path).write_bytes(b"corrupted data")
+        with patch.object(setup, "git", side_effect=self.fake_git), self.assertRaisesRegex(RuntimeError, "checksum"):
+            setup.setup(self.root, check_only=True)
+
+    def test_non_clip_data_expansion_is_not_whitelisted(self):
+        self.status = b" M vlkge/data/wikiart_mkg_v1/features/wikiart_mkg_v1_vf_blip.pkl\0"
+        with patch.object(setup, "git", side_effect=self.fake_git), self.assertRaisesRegex(RuntimeError, "Unrelated dirty"):
+            setup.setup(self.root, check_only=True)
+
     def test_published_license_is_verbatim_author_file(self):
         self.assertEqual((ROOT / "third_party/vl-kge-LICENSE").read_bytes(),
                          (ROOT / "upstream/vl-kge/LICENSE").read_bytes())

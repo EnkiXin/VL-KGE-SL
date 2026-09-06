@@ -29,3 +29,4 @@ STATUS.md
 *.pem
 *.key
 *.download
+Claude outputs/

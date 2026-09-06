@@ -80,3 +80,125 @@ per-epoch validation/loss/timing/memory, and model/optimizer/RNG checkpoints.
 
 Implementation: `geometry/models.py`, `geometry/evaluation.py`,
 `scripts/run_geometry.py`, `scripts/run_geometry_queue.py`.
+
+## Geometry v2 (2026-09-06)
+
+`geometry/models_v2.py` re-implements the SL and Euclidean scorers after the v1
+analysis showed that v1's SL(8) was numerically indistinguishable from a 63-D
+Euclidean model: its radial bound (radius 0.5) kept every matrix within 1% of
+`I + A`, its relation init (1e-4) made the head entity the nearest candidate
+(validation Hits@1 was exactly 0 in the first epochs), and `offset - 100*D^2`
+saturated the logistic loss from the first batch.
+
+Changes: radial *clipping* at a larger radius (entities 2.0, relations 1.5),
+a principal logarithm by inverse scaling and squaring (Denman--Beavers square
+root + Gregory series; flagged fallback for matrices without a real principal
+log), the linear score `offset - exp(log_scale) * D` with learnable modest
+initial values (3, 3), relations initialised at norm 0.5, a free matrix size
+`n` (SL(8) = 63 coordinates, SL(28) = 783), and a Euclidean control that shares
+every other choice.  Runner models: `slv2`, `euclidv2`; queue specs `slv2`,
+`euclidv2`, `slv2n28`.  Diagnostics report the principal-domain margin of
+sampled relative matrices, the logarithm error against an eigen-decomposition
+reference, and the fallback fraction; the runner stops if the sampled error
+exceeds 1e-2 or more than 5% of sampled pairs fell back.
+
+The original v2 launch ran SL(8)/Euclidean pilots and formal runs before a
+separate SL(28) queue. Those results remain a distinct historical experiment.
+
+## SL(28) without a learned entity projection (2026-09-06)
+
+The initially requested **slv2n28 with entity_mapping=fixed_pad** was
+implemented and GPU-smoke-tested, but its long-running queue was cancelled
+before launch when the user clarified that the initial embedding should
+instead be 783-D. The fixed-pad implementation remains available explicitly:
+
+1. Keep the author's trainable 768-D entity table, frozen 768-D CLIP visual
+   and textual features, and original average fusion.
+2. Append exactly 15 zero coordinates to that fused vector: 768 -> 783.
+   There is **no Linear layer or learned entity projection** in this mode.
+3. Apply the existing coordinate scale and radial clipping; map the 783
+   coordinates into the fixed orthonormal trace-free 28x28 basis and exponentiate.
+4. Keep the existing learned 783-D relation coordinates, left matrix action,
+   matrix-log implementation and `b - alpha * D` score unchanged.
+
+The padding is injective, but the overall representation is still subject to
+the already configured radial clipping and nonlinear exponential map. This
+is not a claim that the entire model is globally lossless or equivalent to
+DistMult. The author WN9 configuration has 5,041,152 trainable parameters;
+this no-projection SL(28) has 5,041,289 (only 137 more). The old projected
+SL(28) would have an additional 601,344 projection weights.
+
+CLI default `--entity-mapping linear` preserves historical runner behavior
+and checkpoints; fixed padding is available only when explicitly selected.
+Fixed padding refuses dimensions below 768 instead of truncating features.
+Tests: `python -m unittest tests.test_geometry_v2 tests.test_geometry_queue_v2
+tests.test_geometry_v2_fixed_pad`.
+
+## Cancelled proposal: start at embedding_dim=783 and map directly to SL(28)
+
+This alternative was implemented and unit-tested, but its server launch was
+cancelled before execution after the user selected the 768 -> 783 projection
+experiment instead. It remains explicitly available as slv2n28 with
+embedding_dim=783 and entity_mapping=direct, but is not the launch default.
+
+- The trainable entity table starts at 783 dimensions, as does the relation table.
+- Frozen CLIP image/text features remain 768-D. The unchanged author base
+  automatically creates its original bias-free `visual_linear` and
+  `textual_linear` layers (768 -> 783) to align these modalities before fusion.
+- Author average fusion produces 783 coordinates, used directly as SL(28)
+  algebra coordinates. There is no padding and no post-fusion Linear layer.
+- Existing coordinate scale, clipping radii, relation initialization, matrix
+  exponential/logarithm, relation-left-action and linear-distance scoring are
+  unchanged. No DistMult residual is added.
+- WN9 trainable parameters: **6,342,302**, including 1,202,688 parameters in
+  the two author modality-alignment layers. This is not equal to the original
+  VL-DistMult's 5,041,152, nor to the cancelled fixed-pad variant's 5,041,289.
+
+The script retains LR {0.01,0.03,0.1}, 10 pilot epochs, at most 200 formal
+epochs, validation every 5 epochs, and a validation-selected learning rate.
+Only the final formal checkpoint selected by validation is evaluated on test.
+When replacing a paid-server run, pass `MAX_HOURS` for the remaining already
+authorized budget; changing this model does not authorize a new 24-hour window.
+Additional tests: `python -m unittest tests.test_geometry_v2_direct`.
+
+## Selected architecture: 768 -> Linear(768,783) -> SL(28)
+
+The user's final explicit instruction was to replace the old **768 -> 63 ->
+SL(8)** path with **768 -> 783 -> SL(28)**. `scripts/run_v2_wn9.sh` therefore
+launches only `slv2n28`, `--embedding-dim 768`, `--entity-mapping linear`.
+
+- Keep the author's 768-D trainable entity table, frozen 768-D CLIP features,
+  and unchanged 768-D average fusion. Modality alignment layers are Identity.
+- Use a single learned bias-free `Linear(768,783)` after fusion, followed by
+  the unchanged scale/radial clip and SL(28) algebra/exponential mapping.
+- The relation table has 783 coordinates per relation. Relation action,
+  initialization norm, matrix logarithm and distance score are unchanged.
+- There is no 63-D compression, no fixed padding, no initial 783-D entity
+  table, and no extra modality-projection layers in this selected experiment.
+- WN9 trainable parameters: **5,642,633** (the original VL-DistMult has
+  5,041,152). The post-fusion projection contains 601,344 weights.
+- Only this new model is trained. Old SL(8), old Euclidean, fixed-pad and
+  direct-783 trials will not be resumed. Retained tests for those code paths
+  are CPU compatibility checks, not additional GPU experiments.
+
+The same LR grid, pilot/formal epoch limits, five-epoch validation schedule,
+remaining authorized time limit, backups and test-only-at-the-end protocol
+apply. Architecture-specific tests: `tests.test_geometry_v2_projection783`.
+
+## Latest controller: all three author datasets
+
+`scripts/run_sl28_three_datasets.sh` supersedes the single-dataset launch above
+for the September 6 three-dataset experiment. It retains exactly the selected
+768 -> Linear(768,783) -> SL(28) architecture and extends data handling to
+WN9-IMG, WikiArt-MKG-v1 and WikiArt-MKG-v2. The WikiArt protocols retain the
+author's inductive masks, available-modality fusion and relation-specific
+candidate pools.
+
+Unlike the historical validation-selected launch above, this controller defaults
+to explicit **test-set** checkpoint and learning-rate selection, labeled
+`test_tuned_not_held_out`. Its six learning rates are 0.03, 0.1, 0.01, 0.05,
+0.003 and 0.2. All pilot searches precede the formal runs under one shared
+absolute deadline. See [the configuration](../experiments/sl28_three_datasets_test_tuned.json)
+and [the launch record](../experiments/SL28_THREE_DATASETS_RUN.md). The older
+single-dataset launch and cancelled variants are retained for provenance, not
+silently reused as results for this experiment.

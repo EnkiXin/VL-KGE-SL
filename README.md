@@ -1,7 +1,7 @@
 # VL-KGE-SL
 
 Reproduction of [VL-KGE](https://github.com/thefth/vl-kge) and controlled
-Euclidean, hyperbolic and SL(8) geometry extensions.
+Euclidean, hyperbolic and SL(n) geometry extensions, including SL(8) and SL(28).
 
 Paper: [VL-KGE: Vision–Language Models Meet Knowledge Graph Embeddings](https://arxiv.org/abs/2603.02435).
 Author commit: `c78994e14cf2dfda251b701c2803215d9d5fe254`.
@@ -17,6 +17,8 @@ Author commit: `c78994e14cf2dfda251b701c2803215d9d5fe254`.
   ID tables, matched parameter counts, and the original shared Gregory-12.
 - Unit/integration tests, validation-only HPO manifests and a bounded queue executor.
 - A vendored source snapshot of the shared SL manifold core.
+- **Latest SL(28) experiment**: author 768-D fusion -> learned 783-D projection
+  -> SL(28), with a bounded six-learning-rate search on all three author datasets.
 - [Results and interpretation limits](RESULTS.md), [HPO plan](experiments/SL_HPO_PLAN.md),
   and [third-party provenance](THIRD_PARTY.md).
 
@@ -32,7 +34,34 @@ parameters (+1.92% on WN9); the Euclidean residual has exactly the same count.
 The gate is signed, so a negative learned gate must not be interpreted as
 positive-weight distance-based compatibility.
 
-## Current evidence
+## Latest experiment: SL(28) on three author datasets
+
+The September 6, 2026 experiment retains the author's frozen 768-D CLIP features,
+trainable 768-D entity table and average fusion, then applies one bias-free
+`Linear(768,783)`, the trace-free 28x28 matrix map and matrix exponential.
+Relations act by left multiplication; scoring is `b - alpha * D`, without a
+DistMult residual. The original matrix-log implementation in
+`geometry/models_v2.py` is retained, not the historical GL16 quadrature track.
+
+The controller searches learning rates `{0.03, 0.1, 0.01, 0.05, 0.003, 0.2}`
+with Adagrad, batch size 512 and seed 42. All three pilot searches precede
+the formal runs, with only one GPU job at a time and one shared absolute deadline.
+
+| Dataset | Pilot epochs per rate | Formal maximum epochs |
+| --- | ---: | ---: |
+| WN9-IMG | 10 | 200 |
+| WikiArt-MKG-v1 | 5 | 50 |
+| WikiArt-MKG-v2 | 2 | 20 |
+
+**This experiment explicitly selects both learning rates and checkpoints using
+test MRR.** Results are labeled `test_tuned_not_held_out`: they are exploratory
+test-tuned maxima, not independent held-out estimates or a protocol-matched
+reproduction of the paper. The older validation-selected tracks below remain
+separate. See the [configuration](experiments/sl28_three_datasets_test_tuned.json)
+and [launch record](experiments/SL28_THREE_DATASETS_RUN.md). A configuration or
+launch record does not establish that every stage has completed.
+
+## Recorded evidence from earlier experiments
 
 The original WN9 author models were reproduced: test MRR 0.9350893979
 (VL-DistMult) and 0.9272085161 (VL-ComplEx), matching the paper's rounding.
@@ -59,7 +88,7 @@ directly against the earlier author-release 0.93509 result. Unit tests and
 an executable six-job smoke plan are included; a plan is not a training result.
 
 On September 6 the WN9 GL16 queue was stopped and its completed/partial
-checkpoints backed up. The current study is the
+checkpoints backed up. The subsequent historical study was the
 [structural geometry experiment](experiments/STRUCTURAL_GEOMETRY.md) on
 WN18RR and FB15k-237. It restores the unchanged shared Gregory-12 scorer,
 retains radius 1.5/2, linear distance and same-scale initialization, and removes
@@ -83,14 +112,20 @@ python scripts/setup_upstream.py
 
 # Download only the three WN9 CLIP inputs and verify their Git LFS hashes.
 python scripts/fetch_wn9.py --repo upstream/vl-kge --manifest artifacts/wn9-inputs.json
+
+# For the latest three-dataset experiment, retrieve each dataset's triples
+# and precomputed CLIP inputs (not raw images or encoder weights).
+python scripts/fetch_wn9.py --repo upstream/vl-kge \
+  --datasets wn9_img wikiart_mkg_v1 wikiart_mkg_v2 --manifest-dir artifacts
 ```
 
 `setup_upstream.py` applies only the recorded package-qualified `utils`
 checkpoint-import correction. It does not change model mathematics or author
 YAML. It refuses incompatible existing checkouts; it never overwrites the
-user's unrelated edits. Input retrieval downloads roughly 216 MB.
-Dataset files, checkpoints, environment folders, machine paths, deployment
-notes and credentials are deliberately excluded from this repository.
+user's unrelated edits. WN9 input retrieval downloads roughly 216 MB;
+the WikiArt inputs are additional downloads.
+Dataset files, checkpoints, environment folders, private deployment artifacts
+and credentials are deliberately excluded from this repository.
 
 The author framework uses frozen image/text features; these experiments do
 not train a CLIP encoder or call a paid model API.
@@ -113,7 +148,16 @@ source, but use tiny CPU data and do not need a GPU.
 These commands start training only when deliberately invoked. Run serially
 on a free GPU and choose an explicit compute budget for any search.
 
-For the current structural study, use `scripts/run_structural_geometry.py`
+For the latest three-dataset SL(28) study, use
+`scripts/run_sl28_three_datasets.sh`. It requires an explicit `DEADLINE_UTC`
+(an authorized future ISO-8601 UTC timestamp), `BACKUP_ROOT` (a persistent
+directory outside the source root), and a fresh `CONTROLLER_ID`. Its default
+`SELECTION_SPLIT=test` reproduces the exploratory test-tuned protocol; choose
+`validation` explicitly for validation-based selection. The historical dates
+in the recorded JSON do not grant a new compute budget. Existing run directories
+are never overwritten; interrupted runs are not automatically resumed.
+
+For the historical structural study, use `scripts/run_structural_geometry.py`
 and `scripts/run_structural_geometry_queue.py`, with the smoke/profile plans
 and compute gates in [STRUCTURAL_GEOMETRY.md](experiments/STRUCTURAL_GEOMETRY.md).
 The queue only accepts Gregory-12, uses one fixed UTC deadline, and backs up
@@ -173,17 +217,20 @@ trials finish, and stopping this program does not stop rental billing.
 - Reproduction retains the author's all-split, mixed-direction filtering,
   including its use during negative sampling. A stricter study must apply
   corrections to all models and retrain them consistently.
-- Geometry v1/residual SL scoring uses Gregory-12. Geometry v2 instead uses
-  fixed-order Gauss-Legendre principal-log quadrature, with spectrum and
-  exponential-reconstruction checks on actual scoring blocks. Neither is
-  claimed to be an exact global geodesic or a complete adaptive matrix-log
-  algorithm. Legacy Cayley norm warnings are nonfatal in v2.
+- Geometry v1/residual SL scoring uses Gregory-12. The historical
+  `geometry/wn9_geometry_v2.py` track uses Gauss-Legendre quadrature; the latest
+  `geometry/models_v2.py` uses inverse scaling/squaring and a Gregory series
+  with sampled diagnostics and a flagged fallback. These are distinct tracks.
+  None is claimed to provide an exact global geodesic distance or a complete
+  global matrix-log algorithm.
 - Residual calibration uses training positives and train-filtered negatives
   only. Its center and scale are frozen; a radius-based scale floor guards
   against early saturation. Saturation statistics are recorded each epoch.
 - Original checkpoints lack complete sampler/RNG state. HPO stages restart
   from scratch rather than claiming bitwise-equivalent resumed training.
-- Best-checkpoint selection and HPO use validation, not test scores. Report
+- Earlier tracks select checkpoints and hyperparameters using validation.
+  The latest three-dataset SL(28) run instead explicitly uses test selection
+  and must be labeled accordingly. Report independent held-out evaluations,
   multiple seeds and matched-capacity controls before making superiority claims.
 - Original author results, old geometry v1, the hybrid and geometry v2 are separate
   tracks; do not mix their metrics or protocol labels.

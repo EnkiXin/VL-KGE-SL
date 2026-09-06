@@ -22,7 +22,7 @@ SPEC.loader.exec_module(QUEUE)
 FAKE_RUNNER = '''import argparse, json, os, signal, sys, time
 from pathlib import Path
 p=argparse.ArgumentParser()
-for key in ["root", "model", "run-dir", "epochs", "patience", "seed", "lr", "coordinate-scale", "chart-radius", "initial-logit-scale", "initial-offset", "kind"]:
+for key in ["root", "model", "run-dir", "epochs", "patience", "seed", "lr", "coordinate-scale", "chart-radius", "initial-logit-scale", "initial-offset", "kind", "validate-every"]:
     p.add_argument("--"+key, required=True)
 a=p.parse_args()
 d=Path(a.run_dir); d.mkdir()

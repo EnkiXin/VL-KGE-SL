@@ -1,4 +1,4 @@
-"""Chunked full-entity evaluation matching the author's WN9 release protocol.
+"""Chunked evaluation matching the author's WN9 and WikiArt release protocols.
 
 This module deliberately accepts the *combined-direction* author filter map.
 It does not silently replace that map with a corrected directional protocol.
@@ -30,6 +30,59 @@ def _summarize(ranks: list[int]) -> dict:
     }
 
 
+def _relation_tail_ranks(model, batch, batch_cpu, pools, filter_map, candidate_chunk):
+    """Batch by relation while preserving the author's per-query candidate set.
+
+    Score the sorted pool plus the batch's targets; each row removes known tails
+    and any extra targets belonging only to other rows, then restores its own target.
+    This is the same rank set as (pool - correct_tails) | {target} in the release.
+    """
+    ranks = [None] * len(batch_cpu)
+    for relation in batch_cpu[:, 1].unique().tolist():
+        row_ids = (batch_cpu[:, 1] == relation).nonzero(as_tuple=False).flatten().tolist()
+        subset = batch[row_ids]
+        pool = {int(value) for value in pools.get(relation, ())}
+        candidates = sorted(pool | set(batch_cpu[row_ids, 2].tolist()))
+        if candidates[0] < 0 or candidates[-1] >= model.num_entities:
+            raise ValueError("relation candidate pool contains an out-of-range entity ID")
+        candidate_ids = torch.tensor(candidates, dtype=torch.long, device=batch.device)
+        size = len(row_ids)
+        scores = None
+        for start in range(0, len(candidates), candidate_chunk):
+            chunk = candidate_ids[start:start + candidate_chunk]
+            width = len(chunk)
+            values = model(subset[:, 0, None].expand(size, width).reshape(-1),
+                           subset[:, 1, None].expand(size, width).reshape(-1),
+                           chunk[None].expand(size, width).reshape(-1))
+            if values.ndim != 1 or values.numel() != size * width:
+                raise ValueError("model must return one flat score per input triple")
+            if values.device != batch.device or not values.is_floating_point():
+                raise ValueError("model scores must be floating tensors on the evaluation device")
+            if not torch.isfinite(values).all():
+                raise FloatingPointError("nonfinite unfiltered relation-pool scores")
+            if scores is None:
+                scores = torch.empty((size, len(candidates)), dtype=values.dtype, device=batch.device)
+            elif values.dtype != scores.dtype:
+                raise ValueError("model score dtype changed between candidate chunks")
+            scores[:, start:start + width] = values.reshape(size, width)
+        columns = {entity: column for column, entity in enumerate(candidates)}
+        target_columns = torch.tensor([columns[int(t)] for t in batch_cpu[row_ids, 2]], device=batch.device)
+        target_scores = scores.gather(1, target_columns[:, None]).clone()
+        extra_targets = set(candidates) - pool
+        for row, source_row in enumerate(row_ids):
+            head, _, target = batch_cpu[source_row].tolist()
+            known = filter_map.get((head, relation), set())
+            excluded = (set(known) | extra_targets) - {target}
+            column_ids = [columns[entity] for entity in excluded if entity in columns]
+            if column_ids:
+                scores[row, column_ids] = float("-inf")
+        better = (scores > target_scores).sum(dim=1)
+        ties = ((scores == target_scores) & (candidate_ids[None] < subset[:, 2, None])).sum(dim=1)
+        for source_row, rank in zip(row_ids, (1 + better + ties).cpu().tolist()):
+            ranks[source_row] = rank
+    return ranks
+
+
 def evaluate_full(
     model: torch.nn.Module,
     triples: torch.Tensor,
@@ -38,12 +91,15 @@ def evaluate_full(
     query_batch: int = 16,
     candidate_chunk: int = 512,
     max_queries: int | None = None,
+    bidirectional: bool = True,
+    relation_to_valid_tails: Mapping[int, list[int]] | None = None,
 ) -> dict:
-    """Evaluate all entities in both directions, with author-stable tie ranks.
+    """Evaluate the author candidate/direction policy, with stable tie ranks.
 
     ``triples`` is a CPU integer tensor with rows ``(head, relation, tail)``.
     ``max_queries`` is a diagnostic cap on *input triples*: both directions
-    are always evaluated, producing two rank queries per selected triple.
+    are evaluated only when ``bidirectional=True`` (the legacy WN9 default).
+    WikiArt passes its split-specific relation candidate pools and False.
     ``complete`` in the returned record distinguishes capped evaluation.
 
     The model must expose ``num_entities`` and return one floating score per
@@ -54,6 +110,8 @@ def evaluate_full(
     """
     query_batch = _positive_integer(query_batch, "query_batch")
     candidate_chunk = _positive_integer(candidate_chunk, "candidate_chunk")
+    if not isinstance(bidirectional, bool):
+        raise ValueError("bidirectional must be boolean")
     if max_queries is not None:
         max_queries = _positive_integer(max_queries, "max_queries")
     if not isinstance(triples, torch.Tensor) or triples.ndim != 2 or triples.shape[1] != 3:
@@ -95,7 +153,14 @@ def evaluate_full(
                 batch_cpu = triples[offset:offset + query_batch]
                 batch = batch_cpu.to(device=device)
                 size = len(batch)
-                for direction in ("tail", "head"):
+                for direction in (("tail", "head") if bidirectional else ("tail",)):
+                    if direction == "tail" and relation_to_valid_tails is not None:
+                        ranks = _relation_tail_ranks(model, batch, batch_cpu, relation_to_valid_tails,
+                                                     filter_map, candidate_chunk)
+                        ranks_tail.extend(ranks)
+                        for relation, rank in zip(batch_cpu[:, 1].tolist(), ranks):
+                            relation_tail[relation].append(rank)
+                        continue
                     scores = None
                     for left in range(0, num_entities, candidate_chunk):
                         candidates = all_ids[left:left + candidate_chunk]
@@ -171,10 +236,12 @@ def evaluate_full(
         "elapsed_seconds": elapsed,
         "elapsed": elapsed,
         "evaluated_triples": len(triples),
-        "directional_queries": 2 * len(triples),
+        "directional_queries": (2 if bidirectional else 1) * len(triples),
         "total_triples": total_triples,
         "num_entities": num_entities,
         "complete": len(triples) == total_triples,
         "protocol": "author_release_protocol",
+        "bidirectional": bidirectional,
+        "candidate_policy": "per_relation_tail_pool" if relation_to_valid_tails is not None else "all_entities",
         "tie_policy": "stable_descending_score_then_ascending_entity_id",
     }
