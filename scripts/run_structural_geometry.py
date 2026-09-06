@@ -290,6 +290,9 @@ def main(argv=None):
         from structural_kge.models import StructuralKGE
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA unavailable: refusing unintended CPU training")
+        # Select/initialize CUDA before querying/resetting allocator statistics.
+        torch.cuda.set_device(0)
+        torch.cuda.init()
         random.seed(args.seed)
         np.random.seed(args.seed)
         torch.manual_seed(args.seed)
