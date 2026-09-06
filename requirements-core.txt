@@ -1,0 +1,6 @@
+# Author numerical versions; frozen-feature KGE does not import VLM encoders.
+torch==2.5.1
+numpy==1.26.4
+pandas==2.2.2
+PyYAML==6.0.2
+tqdm==4.66.5

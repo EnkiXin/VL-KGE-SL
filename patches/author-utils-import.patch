@@ -1,0 +1,35 @@
+diff --git a/vlkge/helpers.py b/vlkge/helpers.py
+index c9fc4b7..2a9e4da 100644
+--- a/vlkge/helpers.py
++++ b/vlkge/helpers.py
+@@ -14,6 +14,7 @@ from collections import defaultdict
+ from tqdm import tqdm
+ from torch.utils.data import DataLoader
+ from vlkge.dataloader import KGDataset
++from vlkge import utils
+ 
+ 
+ # ==================== Loss Functions ====================
+@@ -752,7 +753,6 @@ def train(model, train_loader, val_loader, test_loader, sampled_train_loader,
+     
+     if resume_from is not None:
+         print(f"\nResuming training from checkpoint: {resume_from}")
+-        import utils
+         model, optimizer, scheduler, start_epoch, best_val_mrr, additional_info = \
+             utils.load_checkpoint(model, resume_from, optimizer, scheduler, device)
+         
+@@ -892,7 +892,6 @@ def train(model, train_loader, val_loader, test_loader, sampled_train_loader,
+                 early_stop_counter = 0
+                 
+                 if save_path:
+-                    import utils
+                     # Save complete checkpoint with training state
+                     additional_info = {
+                         'best_val_mrr': best_val_mrr,
+@@ -954,4 +953,4 @@ def train(model, train_loader, val_loader, test_loader, sampled_train_loader,
+             print(f"{rel_name:30s}: {metrics_str}")
+         print(f"{'-'*80}\n")
+     
+-    print(f"{'='*80}\n")
+\ No newline at end of file
++    print(f"{'='*80}\n")

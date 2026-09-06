@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "experiment": "wn9-distmult-sl-residual-hpo-v1",
+  "status": "prepared_not_launched",
+  "dataset": "wn9_img",
+  "author_config": "vlkge/configs/wn9_img/distmult_clip.yaml",
+  "methods": ["baseline", "euclidean", "sl8"],
+  "search_seed": 260906,
+  "training_seed": 42,
+  "final_seeds": [42, 2026, 2027],
+  "suggested_initial_hours": 8,
+  "new_gpu_hours_authorized": null,
+  "shared_space": {
+    "batch_size": [128, 256, 512, 1024, 2048],
+    "lr": [0.003, 0.01, 0.03, 0.05, 0.1, 0.2, 0.3],
+    "num_neg_samples": [25, 50, 100, 200]
+  },
+  "extension_space": {
+    "coordinate_scale": [0.03, 0.1, 0.3, 1.0],
+    "chart_radius": [0.25, 0.5, 0.75],
+    "residual_weight": [0.1, 0.3, 1.0, 3.0]
+  },
+  "extension_default": {
+    "coordinate_scale": 0.1,
+    "chart_radius": 0.5,
+    "residual_weight": 1.0,
+    "score_chunk": 1024,
+    "checkpoint_blocks": true
+  },
+  "anchors": [
+    {"lr": 0.1, "batch_size": 512, "num_neg_samples": 100},
+    {"lr": 0.03, "batch_size": 512, "num_neg_samples": 100},
+    {"lr": 0.01, "batch_size": 512, "num_neg_samples": 100},
+    {"lr": 0.03, "batch_size": 256, "num_neg_samples": 100},
+    {"lr": 0.1, "batch_size": 256, "num_neg_samples": 100},
+    {"lr": 0.1, "batch_size": 1024, "num_neg_samples": 100}
+  ],
+  "stages": [
+    {"name": "profile", "configs_per_method": 1, "epochs": 2, "validation_only": true},
+    {"name": "anchors", "configs_per_method": 6, "epochs": 30, "validation_only": true},
+    {"name": "coarse", "configs_per_method": 48, "epochs": 50, "validation_only": true},
+    {"name": "refine", "configs_per_method": 16, "epochs": 100, "validation_only": true},
+    {"name": "full_validation", "configs_per_method": 6, "epochs": 200, "validation_only": true},
+    {"name": "locked_final", "configs_per_method": 1, "epochs": 200, "seeds": [42, 2026, 2027], "validation_only": false}
+  ],
+  "fixed": {
+    "optimizer": "author_Adagrad",
+    "embedding_dim": 768,
+    "sl_n": 8,
+    "fusion_mode": "average",
+    "freeze_visual": true,
+    "freeze_textual": true,
+    "evaluate_every": 1,
+    "patience": 50,
+    "use_scheduler": false,
+    "gradient_clipping": false,
+    "calibration": "fixed_train_only_positive_and_negative_sample",
+    "initial_gate": 0.0,
+    "gate_type": "signed_tanh",
+    "gregory_terms": 12
+  },
+  "policy": {
+    "selection_metric": "best_validation_mrr",
+    "test_used_to_select_hyperparameters": false,
+    "original_all_split_negative_filter_preserved": true,
+    "restart_each_stage_from_scratch": true,
+    "same_trial_counts_per_method": true,
+    "also_report_gpu_hours_and_optimizer_steps": true,
+    "coarse_search": "matched_shared_configs_and_one_extension_factor_at_a_time",
+    "promotions": "rank_by_validation_with_reserved_author_anchor_and_slow_starter_slots",
+    "new_runs_require_explicit_wall_budget": true,
+    "do_not_interrupt_existing_queue": true,
+    "stop_on_oom_or_numerical_risk": true,
+    "no_automatic_batch_reduction": true,
+    "no_automatic_test_evaluation_before_final_lock": true
+  }
+}
